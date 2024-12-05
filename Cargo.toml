@@ -1,0 +1,14 @@
+[package]
+name = "droppa"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rayon = "1.10.0"
+anyhow = "1.0.94"
+tiny_http = "0.12.0"
+multipart = { version = "0.18.0", default-features = false, features = ["server"] }
+
+[[bin]]
+name = "droppa"
+path = "main.rs"
