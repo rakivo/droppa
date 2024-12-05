@@ -9,6 +9,11 @@ anyhow = "1.0.94"
 tiny_http = "0.12.0"
 multipart = { version = "0.18.0", default-features = false, features = ["server"] }
 
+qrcodegen = "1.8.0"
+get_if_addrs = "0.5.3"
+raylib-light = { version = "0.0.4", features = ["native"] }
+
+
 [[bin]]
 name = "droppa"
 path = "main.rs"

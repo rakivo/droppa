@@ -2,9 +2,16 @@ use std::fs::File;
 use std::io::BufWriter;
 
 use anyhow::Result;
+use raylib_light::CloseWindow;
+use get_if_addrs::get_if_addrs;
 use multipart::server::Multipart;
+use qrcodegen::{QrCode, QrCodeEcc};
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use tiny_http::{Response, Request, Header, Server, Method, StatusCode};
+
+mod qr;
+
+use qr::*;
 
 const SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
 
@@ -64,23 +71,39 @@ fn handle_upload(rq: &mut Request) -> Result::<()> {
 }
 
 fn main() -> Result::<()> {
-    let server = Server::http(ADDR_PORT).unwrap();
+    println!("{:?}", get_if_addrs()?.into_iter().skip(1).next().unwrap());
+    let pc_ip = get_if_addrs()?.into_iter().skip(1).next().expect("no interfaces found").addr.ip();
 
-    println!("serving at: http://{ADDR_PORT}");
-    server.incoming_requests().par_bridge().for_each(|mut rq| {
-        if let Err(err) = match (rq.method(), rq.url()) {
-            (&Method::Get, "/") => serve_bytes(rq, HOME_HTML, "text/html; charset=UTF-8"),
-            (&Method::Post, "/upload") => {
-                match handle_upload(&mut rq) {
-                    Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
-                    _ => rq.respond(Response::from_string("OK").with_status_code(StatusCode(200))),
-                }.map_err(Into::into)
-            },
-            _ => serve_bytes(rq, NOT_FOUND_HTML, "text/html; charset=UTF-8")
-        } {
-            eprintln!("{err}")
-        }
+    let server_thread = std::thread::spawn(move || {
+        let server = Server::http(ADDR_PORT).unwrap();
+        println!("serving at: http://{ADDR_PORT}");
+        server.incoming_requests().par_bridge().for_each(|mut rq| {
+            if let Err(err) = match (rq.method(), rq.url()) {
+                (&Method::Get, "/") => serve_bytes(rq, HOME_HTML, "text/html; charset=UTF-8"),
+                (&Method::Post, "/upload") => {
+                    match handle_upload(&mut rq) {
+                        Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
+                        _ => rq.respond(Response::from_string("OK").with_status_code(StatusCode(200))),
+                    }.map_err(Into::into)
+                },
+                _ => serve_bytes(rq, NOT_FOUND_HTML, "text/html; charset=UTF-8")
+            } {
+                eprintln!("{err}")
+            }
+        });
     });
+
+    let local_addr = format!("http://{pc_ip:?}:{PORT}");
+    println!("{local_addr}");
+
+    let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode url to qr code");
+    unsafe {
+        init_raylib();
+        draw_qr_code(gen_qr_canvas(&qr));
+        CloseWindow()
+    }
+
+    server_thread.join().unwrap();
 
     Ok(())
 }
