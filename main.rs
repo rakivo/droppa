@@ -9,7 +9,7 @@ use tiny_http::{Response, Request, Header, Server, Method, StatusCode};
 const SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
 
 const NOT_FOUND_HTML: &[u8] = b"<h1>NOT FOUND</h1>";
-const HTML_BYTES: &[u8] = include_bytes!("index.html");
+const HOME_HTML: &[u8] = include_bytes!("index.html");
 
 macro_rules! define_addr_port {
     (const ADDR: &str = $addr: literal; const PORT: &str = $port: literal;) => {
@@ -69,7 +69,7 @@ fn main() -> Result::<()> {
     println!("serving at: http://{ADDR_PORT}");
     server.incoming_requests().par_bridge().for_each(|mut rq| {
         if let Err(err) = match (rq.method(), rq.url()) {
-            (&Method::Get, "/") => serve_bytes(rq, HTML_BYTES, "text/html; charset=UTF-8"),
+            (&Method::Get, "/") => serve_bytes(rq, HOME_HTML, "text/html; charset=UTF-8"),
             (&Method::Post, "/upload") => {
                 match handle_upload(&mut rq) {
                     Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
