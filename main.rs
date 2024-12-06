@@ -1,11 +1,13 @@
 use std::fs::File;
-use std::io::BufWriter;
+use std::net::TcpStream;
+use std::io::{Write, BufWriter};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 use anyhow::Result;
 use raylib_light::CloseWindow;
-use get_if_addrs::get_if_addrs;
 use multipart::server::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
+use get_if_addrs::{IfAddr, get_if_addrs};
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use tiny_http::{Response, Request, Header, Server, Method, StatusCode};
 
@@ -117,7 +119,7 @@ fn main() -> Result::<()> {
         });
     });
 
-    let local_addr = format!("http://{pc_ip:?}:{PORT}");
+    let local_addr = format!("http://{local_ip:?}:{PORT}");
     println!("{local_addr}");
 
     let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode url to qr code");
@@ -125,6 +127,12 @@ fn main() -> Result::<()> {
         init_raylib();
         draw_qr_code(gen_qr_canvas(&qr));
         CloseWindow()
+    }
+
+    stopc.store(true, Ordering::SeqCst);
+    // send a dummy request to unblock `incoming_requests`
+    if let Err(e) = dummy_http_rq(ADDR_PORT) {
+        eprintln!("error: could not send a dummy request to {ADDR_PORT} to `incoming_requests` to shut down the server: {e}")
     }
 
     server_thread.join().unwrap();
