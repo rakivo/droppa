@@ -70,14 +70,38 @@ fn handle_upload(rq: &mut Request) -> Result::<()> {
     Ok(())
 }
 
+fn dummy_http_rq(addr: &str) -> std::io::Result<()> {
+    let mut stream = TcpStream::connect(addr)?;
+    let rq = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    stream.write_all(rq.as_bytes())?;
+    Ok(())
+}
+
+
 fn main() -> Result::<()> {
-    println!("{:?}", get_if_addrs()?.into_iter().skip(1).next().unwrap());
-    let pc_ip = get_if_addrs()?.into_iter().skip(1).next().expect("no interfaces found").addr.ip();
+    let Some(local_ip) = get_if_addrs()?.into_iter().find_map(|iface| {
+        if iface.is_loopback() { return None }
+        if let IfAddr::V4(addr) = iface.addr {
+            Some(addr.ip)
+        } else {
+            None
+        }
+    }) else {
+        panic!("could not local ipv4 address of the network interface")
+    };
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopc = Arc::clone(&stop);
 
     let server_thread = std::thread::spawn(move || {
         let server = Server::http(ADDR_PORT).unwrap();
         println!("serving at: http://{ADDR_PORT}");
         server.incoming_requests().par_bridge().for_each(|mut rq| {
+            if stop.load(Ordering::SeqCst) {
+                println!("[INFO] Shutting down the server.");
+                server.unblock();
+            }
+
             if let Err(err) = match (rq.method(), rq.url()) {
                 (&Method::Get, "/") => serve_bytes(rq, HOME_HTML, "text/html; charset=UTF-8"),
                 (&Method::Post, "/upload") => {
