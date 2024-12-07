@@ -40,6 +40,10 @@ macro_rules! define_addr_port {
     };
 }
 
+macro_rules! anyerr {
+    ($lit: literal) => { Err(anyhow::anyhow!($lit)) };
+}
+
 define_addr_port!{
     const ADDR: &str = "0.0.0.0";
     const PORT: &str = "6969";
@@ -133,7 +137,8 @@ impl<W: Write> Write for ProgressTracker::<'_, W> {
 struct Server {
     stop: AtomicStop,
     server: TinyHttpServer,
-    clients: AtomicClients
+    clients: AtomicClients,
+    sse_response: Response::<std::io::Empty>
 }
 
 impl Server {
@@ -141,7 +146,11 @@ impl Server {
         Self {
             stop,
             server: TinyHttpServer::http(ADDR_PORT).unwrap(),
-            clients: Arc::new(Mutex::new(Clients::new()))
+            clients: Arc::new(Mutex::new(Clients::new())),
+            sse_response: Response::empty(StatusCode(200))
+                .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
+                .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
+                .with_header(Header::from_bytes("Connection", "keep-alive").unwrap()),
         }
     }
 
@@ -153,13 +162,14 @@ impl Server {
 
         let content_type_value = content_type.value.as_str();
         if !content_type_value.starts_with("multipart/form-data; boundary=") {
-            return Err(anyhow::anyhow!("Invalid Content-Type"))
+            return anyerr!("Invalid Content-Type")
         }
 
         let boundary = content_type_value["multipart/form-data; boundary=".len()..].to_owned();
         let mut multipart = Multipart::with_body(rq.as_reader(), boundary);
 
-        let Ok(Some(Some(file_size))) = multipart.read_entry().map(|res| res.map(|mut field| {
+        let Ok(file_size) = multipart.read_entry() else { return anyerr!("Invalid Multipart data") };
+        let Some(Some(file_size)) = file_size.map(|mut field| {
             if field.headers.name == "size".into() {
                 let mut buf = String::with_capacity(20);
                 field.data.read_to_string(&mut buf).unwrap();
@@ -167,12 +177,12 @@ impl Server {
             } else {
                 None
             }
-        })) else {
-            return Err(anyhow::anyhow!("Invalid Multipart data"))
+        }) else {
+            return anyerr!("Invalid Multipart data")
         };
 
         let Ok(Some(mut field)) = multipart.read_entry() else {
-            return Err(anyhow::anyhow!("Invalid Multipart data"))
+            return anyerr!("Invalid Multipart data")
         };
 
         let file_path = field.headers.filename.map(|f| FilePath(f.into())).unwrap();
@@ -190,7 +200,7 @@ impl Server {
             let mut clients = self.clients.lock().unwrap();
             let writer = clients.get_mut(&file_path.0).unwrap();
             if writer.write_all(b"data: {{ \"progress\": 100 }}\n\n").is_err() {
-                eprintln!("error: client disconnected from /{file_path}/progress");
+                eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{file_path}");
             }
             writer.flush().unwrap();
         }
@@ -198,46 +208,41 @@ impl Server {
         Ok(file_path)
     }
 
+    fn handle_rq(&self, mut rq: Request) -> Result::<()> {
+        match (rq.method(), rq.url()) {
+            (&Method::Get, "/") => serve_bytes(rq, HOME_HTML, "text/html; charset=UTF-8"),
+            (&Method::Get, "/index.js") => serve_bytes(rq, HOME_SCRIPT, "application/js; charset=UTF-8"),
+            (&Method::Post, "/upload") => {
+                match self.handle_upload(&mut rq) {
+                    Ok(fp) => {
+                        _ = self.clients.lock().unwrap().remove_entry(&fp.0);
+                        rq.respond(Response::empty(StatusCode(200)))
+                    }
+                    Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
+                }.map_err(Into::into)
+            },
+            (&Method::Get, path) => if path.starts_with("/progress") {
+                let file_path = path[const { "/progress".len() + 1 }..].to_owned();
+                let stream = rq.upgrade("SSE", self.sse_response.clone());
+                println!("[INFO] client connected to <http://{ADDR_PORT}/progress/{file_path}>");
+                self.clients.lock().unwrap().insert(file_path, stream);
+                Ok(())
+            } else {
+                serve_bytes(rq, NOT_FOUND_HTML, "text/html; charset=UTF-8")
+            }
+            _ => Ok(())
+        }
+    }
+
     fn serve(&mut self) {
-        let clients = Arc::new(Mutex::new(Clients::new()));
-
-        let sse_response = Response::empty(StatusCode(200))
-            .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
-            .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
-            .with_header(Header::from_bytes("Connection", "keep-alive").unwrap());
-
         println!("serving at: <http://{ADDR_PORT}>");
-        self.server.incoming_requests().par_bridge().for_each(|mut rq| {
+        self.server.incoming_requests().par_bridge().for_each(|rq| {
             if self.stop.load(Ordering::SeqCst) {
                 println!("[INFO] shutting down the server.");
                 self.server.unblock()
             }
 
-            if let Err(err) = match (rq.method(), rq.url()) {
-                (&Method::Get, "/") => serve_bytes(rq, HOME_HTML, "text/html; charset=UTF-8"),
-                (&Method::Get, "/index.js") => serve_bytes(rq, HOME_SCRIPT, "application/js; charset=UTF-8"),
-                (&Method::Post, "/upload") => {
-                    match self.handle_upload(&mut rq) {
-                        Ok(fp) => {
-                            _ = self.clients.lock().unwrap().remove_entry(&fp.0);
-                            rq.respond(Response::empty(StatusCode(200)))
-                        }
-                        Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
-                    }.map_err(Into::into)
-                },
-                (&Method::Get, path) => if path.starts_with("/progress") {
-                    let file_path = path[const { "/progress".len() + 1 }..].to_owned();
-                    let stream = rq.upgrade("SSE", sse_response.clone());
-                    println!("[INFO] client connected to <http://{ADDR_PORT}/progress/{file_path}>");
-                    clients.lock().unwrap().insert(file_path, stream);
-                    Ok(())
-                } else {
-                    serve_bytes(rq, NOT_FOUND_HTML, "text/html; charset=UTF-8")
-                }
-                _ => Ok(())
-            } {
-                eprintln!("{err}")
-            }
+            _ = self.handle_rq(rq).inspect_err(|e| eprintln!("{e}"));
         });
     }
 }
@@ -257,9 +262,9 @@ fn dummy_http_rq(addr: &str) -> std::io::Result::<()> {
 }
 
 fn main() -> Result::<()> {
-    let Some(local_ip) = get_if_addrs()?.into_iter().filter(|iface| {
+    let Some(Some(local_ip)) = get_if_addrs()?.into_iter().find(|iface| {
         !iface.is_loopback()
-    }).next().map(|iface| {
+    }).map(|iface| {
         if let IfAddr::V4(addr) = iface.addr {
             Some(addr.ip)
         } else {
