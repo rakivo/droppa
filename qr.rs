@@ -33,6 +33,7 @@ pub unsafe fn gen_qr_canvas(qr: &QrCode) -> Texture2D {
 }
 
 pub unsafe fn init_raylib() {
+    SetTraceLogLevel(TraceLogLevel::Error as _);
     SetWindowState(ConfigFlags::WindowHidden as u32 | ConfigFlags::WindowUndecorated as u32);
     InitWindow(230 + QUIET_ZONE_SIZE, 230 + QUIET_ZONE_SIZE, cstr!("qr"));
     SetTargetFPS(30);
