@@ -192,6 +192,11 @@ fn handle_upload(rq: &mut Request, clients: AtomicClients) -> Result::<()> {
 fn server_serve(server: &Server, stop: &AtomicStop) {
     let clients = Arc::new(Mutex::new(Clients::new()));
 
+    let sse_response = Response::empty(StatusCode(200))
+        .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
+        .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
+        .with_header(Header::from_bytes("Connection", "keep-alive").unwrap());
+
     println!("serving at: <http://{ADDR_PORT}>");
     server.incoming_requests().par_bridge().for_each(|mut rq| {
         if stop.load(Ordering::SeqCst) {
@@ -209,19 +214,10 @@ fn server_serve(server: &Server, stop: &AtomicStop) {
                 }.map_err(Into::into)
             },
             (&Method::Get, path) => if path.starts_with("/progress") {
-                let file_path = &path["/progress".len() + 1..];
-                let file_path = &path["/progress".len() + 1..];
-                let response = Response::empty(StatusCode(200))
-                    .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
-                    .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
-                    .with_header(Header::from_bytes("Connection", "keep-alive").unwrap());
-
-                let file_path = file_path.to_owned();
-                let stream = rq.upgrade("SSE", response);
-
-                println!("[INFO] client connected to <http://{ADDR_PORT}/{file_path}/progress>");
+                let file_path = path[const { "/progress".len() + 1 }..].to_owned();
+                let stream = rq.upgrade("SSE", sse_response.clone());
+                println!("[INFO] client connected to <http://{ADDR_PORT}/progress/{file_path}>");
                 clients.lock().unwrap().insert(file_path, stream);
-
                 Ok(())
             } else {
                 serve_bytes(rq, NOT_FOUND_HTML, "text/html; charset=UTF-8")
