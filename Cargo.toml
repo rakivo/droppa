@@ -7,12 +7,11 @@ edition = "2021"
 rayon = "1.10.0"
 anyhow = "1.0.94"
 tiny_http = "0.12.0"
-multipart = { version = "0.18.0", default-features = false, features = ["server"] }
+multipart = { git = "https://github.com/rakivo/multipart" }
 
 qrcodegen = "1.8.0"
 get_if_addrs = "0.5.3"
 raylib-light = { version = "0.0.4", features = ["native"] }
-
 
 [[bin]]
 name = "droppa"
