@@ -1,7 +1,9 @@
 use std::fs::File;
+use std::sync::Arc;
+use std::fmt::Display;
 use std::net::TcpStream;
 use std::io::{Write, BufWriter};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use raylib_light::CloseWindow;
@@ -15,6 +17,7 @@ mod qr;
 use qr::*;
 
 const SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
+const DUMMY_HTTP_RQ: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 
 const NOT_FOUND_HTML: &[u8] = b"<h1>NOT FOUND</h1>";
 const HOME_HTML: &[u8] = include_bytes!("index.html");
@@ -35,6 +38,22 @@ macro_rules! define_addr_port {
 define_addr_port!{
     const ADDR: &str = "0.0.0.0";
     const PORT: &str = "6969";
+}
+
+struct FilePath(String);
+
+impl FilePath { const MAX_LEN: usize = 25; }
+
+impl Display for FilePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let split = self.0.len().min(Self::MAX_LEN);
+        write!{
+            f,
+            "{s}{dots}",
+            s = &self.0[..split],
+            dots = if self.0.len() > Self::MAX_LEN { "..." } else { "" }
+        }
+    }
 }
 
 #[inline]
@@ -58,32 +77,23 @@ fn handle_upload(rq: &mut Request) -> Result::<()> {
     }
 
     let boundary = content_type_value["multipart/form-data; boundary=".len()..].to_owned();
-
-    println!("[INFO] Iterating multipart");
     let mut multipart = Multipart::with_body(rq.as_reader(), boundary);
     
     while let Some(mut field) = multipart.read_entry()? {
-        let Some(file_name) = field.headers.filename else { continue };
-        println!("[INFO] Creating {file_name}");
-        let file = File::create(&file_name)?;
+        let Some(file_path) = field.headers.filename.map(FilePath) else { continue };
+        println!("[{file_path}] creating file");
+        let file = File::create(&file_path.0)?;
         let wbuf = BufWriter::new(file);
-        println!("[INFO] Copying data to {file_name}");
+        println!("[{file_path}] copying data..");
         field.data.save().size_limit(SIZE_LIMIT).write_to(wbuf);
-        println!("[INFO] Uploaded {file_name}");
+        println!("[{file_path}] done!");
     }
 
     Ok(())
 }
 
-fn dummy_http_rq(addr: &str) -> std::io::Result<()> {
-    let mut stream = TcpStream::connect(addr)?;
-    let rq = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    stream.write_all(rq.as_bytes())?;
-    Ok(())
-}
-
 fn server_serve(server: &Server, stop: &AtomicStop) {
-    println!("serving at: http://{ADDR_PORT}");
+    println!("serving at: <http://{ADDR_PORT}>");
     server.incoming_requests().par_bridge().for_each(|mut rq| {
         if stop.load(Ordering::SeqCst) {
             println!("[INFO] Shutting down the server.");
@@ -103,6 +113,12 @@ fn server_serve(server: &Server, stop: &AtomicStop) {
             eprintln!("{err}")
         }
     });
+}
+
+fn dummy_http_rq(addr: &str) -> std::io::Result<()> {
+    let mut stream = TcpStream::connect(addr)?;
+    stream.write_all(DUMMY_HTTP_RQ)?;
+    Ok(())
 }
 
 fn main() -> Result::<()> {
