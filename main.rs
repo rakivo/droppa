@@ -12,13 +12,14 @@ use rayon::iter::{ParallelBridge, ParallelIterator};
 use tiny_http::{Response, Request, Header, Server, Method, StatusCode};
 
 mod qr;
-
 use qr::*;
 
 const SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
 
 const NOT_FOUND_HTML: &[u8] = b"<h1>NOT FOUND</h1>";
 const HOME_HTML: &[u8] = include_bytes!("index.html");
+
+type AtomicStop = Arc::<AtomicBool>;
 
 macro_rules! define_addr_port {
     (const ADDR: &str = $addr: literal; const PORT: &str = $port: literal;) => {
@@ -38,7 +39,9 @@ define_addr_port!{
 
 #[inline]
 fn serve_bytes(request: Request, bytes: &[u8], content_type: &str) -> Result::<()> {
-    let content_type_header = Header::from_bytes("Content-Type", content_type).unwrap();
+    let content_type_header = unsafe {
+        Header::from_bytes("Content-Type", content_type).unwrap_unchecked()
+    };
     request.respond(Response::from_data(bytes).with_header(content_type_header))?;
     Ok(())
 }
@@ -79,6 +82,28 @@ fn dummy_http_rq(addr: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+fn server_serve(server: &Server, stop: &AtomicStop) {
+    println!("serving at: http://{ADDR_PORT}");
+    server.incoming_requests().par_bridge().for_each(|mut rq| {
+        if stop.load(Ordering::SeqCst) {
+            println!("[INFO] Shutting down the server.");
+            server.unblock()
+        }
+
+        if let Err(err) = match (rq.method(), rq.url()) {
+            (&Method::Get, "/") => serve_bytes(rq, HOME_HTML, "text/html; charset=UTF-8"),
+            (&Method::Post, "/upload") => {
+                match handle_upload(&mut rq) {
+                    Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
+                    _ => rq.respond(Response::from_string("OK").with_status_code(StatusCode(200))),
+                }.map_err(Into::into)
+            },
+            _ => serve_bytes(rq, NOT_FOUND_HTML, "text/html; charset=UTF-8")
+        } {
+            eprintln!("{err}")
+        }
+    });
+}
 
 fn main() -> Result::<()> {
     let Some(local_ip) = get_if_addrs()?.into_iter().find_map(|iface| {
@@ -97,31 +122,10 @@ fn main() -> Result::<()> {
 
     let server_thread = std::thread::spawn(move || {
         let server = Server::http(ADDR_PORT).unwrap();
-        println!("serving at: http://{ADDR_PORT}");
-        server.incoming_requests().par_bridge().for_each(|mut rq| {
-            if stop.load(Ordering::SeqCst) {
-                println!("[INFO] Shutting down the server.");
-                server.unblock();
-            }
-
-            if let Err(err) = match (rq.method(), rq.url()) {
-                (&Method::Get, "/") => serve_bytes(rq, HOME_HTML, "text/html; charset=UTF-8"),
-                (&Method::Post, "/upload") => {
-                    match handle_upload(&mut rq) {
-                        Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
-                        _ => rq.respond(Response::from_string("OK").with_status_code(StatusCode(200))),
-                    }.map_err(Into::into)
-                },
-                _ => serve_bytes(rq, NOT_FOUND_HTML, "text/html; charset=UTF-8")
-            } {
-                eprintln!("{err}")
-            }
-        });
+        server_serve(&server, &stopc)
     });
 
     let local_addr = format!("http://{local_ip:?}:{PORT}");
-    println!("{local_addr}");
-
     let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode url to qr code");
     unsafe {
         init_raylib();
@@ -129,7 +133,7 @@ fn main() -> Result::<()> {
         CloseWindow()
     }
 
-    stopc.store(true, Ordering::SeqCst);
+    stop.store(true, Ordering::SeqCst);
     // send a dummy request to unblock `incoming_requests`
     if let Err(e) = dummy_http_rq(ADDR_PORT) {
         eprintln!("error: could not send a dummy request to {ADDR_PORT} to `incoming_requests` to shut down the server: {e}")
