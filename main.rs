@@ -100,12 +100,12 @@ impl<'a, W: Write> ProgressTracker::<'a, W> {
         let p = self.progress();
         if p % 5 == 0 {
             let mut clients = self.clients.lock().unwrap();
-            if let Some(writer) = clients.get_mut(self.file_path) {
-                let file_path = self.file_path;
-                let msg = format!("data: {{ \"progress\": {p} }}\n\n");
-                if writer.write_all(msg.as_bytes()).is_err() {
-                    eprintln!("error: client disconnected from /{file_path}/progress");
-                }
+            let writer = clients.get_mut(self.file_path).unwrap();
+            let file_path = self.file_path;
+            let msg = format!("data: {{ \"progress\": {p} }}\n\n");
+            #[cfg(debug_assertions)]
+            if let Err(e) = writer.write_all(msg.as_bytes()) {
+                eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{file_path}, or error occured: {e}")
             }
         }
     }
@@ -199,10 +199,11 @@ impl Server {
         {
             let mut clients = self.clients.lock().unwrap();
             let writer = clients.get_mut(&file_path.0).unwrap();
-            if writer.write_all(b"data: {{ \"progress\": 100 }}\n\n").is_err() {
-                eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{file_path}");
+            #[cfg(debug_assertions)]
+            if let Err(e) = writer.write_all(b"data: {{ \"progress\": 100 }}\n\n") {
+                eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{file_path}, or error occured: {e}")
             }
-            writer.flush().unwrap();
+            _ = writer.flush()
         }
 
         Ok(file_path)

@@ -26,13 +26,43 @@ async function uploadFile(file, statusDiv) {
     formData.append('file', file);
 
     const message = document.createElement('div');
-    message.textContent = `Uploading ${file.name}...`;
+    message.textContent = `Preparing upload for ${file.name}...`;
     message.classList.add('status-message');
     statusDiv.appendChild(message);
 
     try {
-        listenToProgress(file.name, message);
+await new Promise((resolve, reject) => {
+            const eventSource = new EventSource(`/progress/${file.name}`);
+            let isComplete = false;
 
+            eventSource.onmessage = (event) => {
+                const progressData = JSON.parse(event.data);
+                if (progressData.progress !== undefined) {
+                    const progress = progressData.progress;
+                    message.textContent = `${file.name}: Upload progress: ${progress}%`;
+
+                    if (progress === 100) {
+                        message.textContent = `${file.name} uploaded successfully!`;
+                        message.classList.add('success');
+                        isComplete = true;
+                        eventSource.close(); // Close the connection after 100% progress
+                        resolve(); // Resolve the promise
+                    }
+                }
+            };
+
+            eventSource.onerror = (error) => {
+                console.error(`Error on progress connection for ${file.name}`, error);
+                if (!isComplete) {
+                    message.textContent = `${file.name}: Error establishing progress connection.`;
+                    message.classList.add('error');
+                    eventSource.close();
+                    reject(new Error(`Progress connection failed for ${file.name}`));
+                }
+            };
+        });
+
+        // Proceed to upload the file
         const response = await fetch('/upload', {
             method: 'POST',
             body: formData,
@@ -44,34 +74,11 @@ async function uploadFile(file, statusDiv) {
             message.classList.add('error');
             return;
         }
+
+        message.textContent = `${file.name} uploaded successfully!`;
+        message.classList.add('success');
     } catch (error) {
         message.textContent = `${file.name} error: ${error.message}`;
         message.classList.add('error');
     }
-}
-
-function listenToProgress(fileName, message) {
-    const eventSource = new EventSource(`/progress/${fileName}`);
-
-    eventSource.onmessage = (event) => {
-        try {
-            const { progress } = JSON.parse(event.data);
-            message.textContent = `Uploading ${fileName}: ${progress}%`;
-            if (progress >= 100) {
-                message.textContent = `${fileName} upload complete!`;
-                message.classList.add('success');
-                eventSource.close();
-                return;
-            }
-        } catch (error) {
-            console.error("Failed to parse progress update:", error);
-        }
-    };
-
-    eventSource.onerror = () => {
-        console.error(`Error receiving progress for ${fileName}`);
-        message.textContent = `${fileName} upload failed!`;
-        message.classList.add('error');
-        eventSource.close();
-    };
 }
