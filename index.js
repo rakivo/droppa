@@ -60,7 +60,7 @@ function listenToProgress(fileName, message) {
 
             console.log(progress);
 
-            if (progress >= 95) {
+            if (progress >= 100) {
                 message.textContent = `${fileName} upload complete!`;
                 message.classList.add('success');
                 eventSource.close();

@@ -1,5 +1,7 @@
 use std::fs::File;
 use std::fmt::Display;
+use std::thread::sleep;
+use std::time::Duration;
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
@@ -18,6 +20,7 @@ mod qr;
 use qr::*;
 
 const SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
+const PROGRESS_CONNECTION_PRECLOSE_DELAY: u64 = 250; // millis
 const DUMMY_HTTP_RQ: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 
 const NOT_FOUND_HTML: &[u8] = b"<h1>NOT FOUND</h1>";
@@ -48,16 +51,26 @@ define_addr_port!{
 #[derive(Eq, Hash, Clone, PartialEq)]
 struct FilePath(String);
 
-impl FilePath { const MAX_LEN: usize = 25; }
+impl FilePath { const MAX_LEN: usize = 30; }
 
 impl Display for FilePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let split = self.0.len().min(Self::MAX_LEN);
-        write!{
-            f,
-            "{s}{dots}",
-            s = &self.0[..split],
-            dots = if self.0.len() > Self::MAX_LEN { "..." } else { "" }
+        let FilePath(ref full_file_path) = self;
+
+        let ext_pos = full_file_path.rfind('.').unwrap_or(full_file_path.len());
+        let (name_part, ext_part) = full_file_path.split_at(ext_pos);
+
+        if full_file_path.len() > Self::MAX_LEN {
+            const DOTS: &str = "[...]";
+            let trim_len = Self::MAX_LEN - ext_part.len() - const { DOTS.len() };
+            let trimmed_name = if trim_len > 0 {
+                &name_part[..trim_len]
+            } else {
+                "" // ext too long
+            };
+            write!(f, "{trimmed_name}{DOTS}{ext_part}")
+        } else {
+            write!(f, "{full_file_path}")
         }
     }
 }
@@ -103,10 +116,10 @@ impl<W: Write> Write for ProgressTracker::<'_, W> {
         if p % 5 == 0 {
             let msg = format!("data: {{ \"progress\": {p} }}\n\n");
             let file_path = self.file_path;
-            if let Some(writer) = self.clients.lock().unwrap().get_mut(file_path) {
-                if writer.write_all(msg.as_bytes()).is_err() {
-                    eprintln!("error: client disconnected from /{file_path}/progress");
-                }
+            let mut clients = self.clients.lock().unwrap();
+            let writer = clients.get_mut(file_path).unwrap();
+            if writer.write_all(msg.as_bytes()).is_err() {
+                eprintln!("error: client disconnected from /{file_path}/progress");
             }
         }
 
@@ -165,6 +178,15 @@ fn handle_upload(rq: &mut Request, clients: AtomicClients) -> Result::<()> {
     field.data.save().size_limit(SIZE_LIMIT).write_to(writer);
     println!("[{file_path}] done!");
 
+    {
+        let mut clients = clients.lock().unwrap();
+        let writer = clients.get_mut(&file_path.0).unwrap();
+        if writer.write_all(b"data: {{ \"progress\": 100 }}\n\n").is_err() {
+            eprintln!("error: client disconnected from /{file_path}/progress");
+        }
+    }
+
+    sleep(Duration::from_millis(PROGRESS_CONNECTION_PRECLOSE_DELAY));
     _ = clients.lock().unwrap().remove_entry(&file_path.0);
 
     Ok(())
