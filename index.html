@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multi File Upload</title>
+    <title>Multi File Upload with Progress</title>
     <style>
       body {
           font-family: Arial, sans-serif;
@@ -60,67 +60,18 @@
       .error {
           color: red;
       }
+      .progress {
+          color: blue;
+      }
     </style>
   </head>
   <body>
-    <h1>Multi File Upload</h1>
+    <h1>Multi File Upload with Progress</h1>
     <form id="upload-form">
       <input type="file" id="file-input" name="files" multiple required>
       <button type="button" id="upload-button">Upload</button>
     </form>
     <div id="status"></div>
-
-    <script>
-      document.getElementById('upload-button').addEventListener('click', async () => {
-          const fileInput = document.getElementById('file-input');
-          const statusDiv = document.getElementById('status');
-          statusDiv.innerHTML = ''; // Clear previous status messages
-
-          if (!fileInput.files.length) {
-              const message = document.createElement('div');
-              message.textContent = "Please select files!";
-              message.classList.add('status-message', 'error');
-              statusDiv.appendChild(message);
-              return;
-          }
-
-          const files = Array.from(fileInput.files);
-
-          // Start parallel uploads
-          const uploadPromises = files.map((file) => uploadFile(file, statusDiv));
-
-          // Wait for all uploads to complete
-          await Promise.all(uploadPromises);
-      });
-
-      async function uploadFile(file, statusDiv) {
-          const formData = new FormData();
-          formData.append('file', file);
-
-          const message = document.createElement('div');
-          message.textContent = `Uploading ${file.name}...`;
-          message.classList.add('status-message');
-          statusDiv.appendChild(message);
-
-          try {
-              const response = await fetch('/upload', {
-                  method: 'POST',
-                  body: formData,
-              });
-
-              if (response.ok) {
-                  message.textContent = `${file.name} uploaded successfully!`;
-                  message.classList.add('success');
-              } else {
-                  const errorText = await response.text();
-                  message.textContent = `${file.name} failed: ${errorText}`;
-                  message.classList.add('error');
-              }
-          } catch (error) {
-              message.textContent = `${file.name} error: ${error.message}`;
-              message.classList.add('error');
-          }
-      }
-    </script>
+    <script src="index.js"></script>
   </body>
 </html>

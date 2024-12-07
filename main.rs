@@ -1,9 +1,10 @@
 use std::fs::File;
-use std::sync::Arc;
 use std::fmt::Display;
 use std::net::TcpStream;
-use std::io::{Write, BufWriter};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::io::{Read, Write, BufWriter};
+use std::sync::atomic::{Ordering, AtomicBool, AtomicU64};
 
 use anyhow::Result;
 use raylib_light::CloseWindow;
@@ -11,7 +12,7 @@ use multipart::server::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
 use get_if_addrs::{IfAddr, get_if_addrs};
 use rayon::iter::{ParallelBridge, ParallelIterator};
-use tiny_http::{Response, Request, Header, Server, Method, StatusCode};
+use tiny_http::{ReadWrite, Header, Server, Method, Request, Response, StatusCode};
 
 mod qr;
 use qr::*;
@@ -21,8 +22,12 @@ const DUMMY_HTTP_RQ: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: 
 
 const NOT_FOUND_HTML: &[u8] = b"<h1>NOT FOUND</h1>";
 const HOME_HTML: &[u8] = include_bytes!("index.html");
+const HOME_SCRIPT: &[u8] = include_bytes!("index.js");
+
+type Clients = HashMap::<String, Box::<dyn ReadWrite + Send>>;
 
 type AtomicStop = Arc::<AtomicBool>;
+type AtomicClients = Arc::<Mutex::<Clients>>;
 
 macro_rules! define_addr_port {
     (const ADDR: &str = $addr: literal; const PORT: &str = $port: literal;) => {
@@ -40,6 +45,7 @@ define_addr_port!{
     const PORT: &str = "6969";
 }
 
+#[derive(Eq, Hash, Clone, PartialEq)]
 struct FilePath(String);
 
 impl FilePath { const MAX_LEN: usize = 25; }
@@ -56,6 +62,63 @@ impl Display for FilePath {
     }
 }
 
+struct ProgressTracker<'a, W: Write> {
+    writer: W,
+    total_size: u64,
+    written: Arc::<AtomicU64>,
+    file_path: &'a String,
+    clients: AtomicClients
+}
+
+impl<'a, W: Write> ProgressTracker::<'a, W> {
+    #[inline]
+    pub fn new(writer: W, total_size: u64, file_path: &'a String, clients: AtomicClients) -> Self {
+        Self {
+            writer,
+            total_size,
+            written: Arc::new(AtomicU64::new(0)),
+
+            file_path,
+            clients
+        }
+    }
+
+    #[inline]
+    pub fn progress(&self) -> u64 {
+        let written = self.written.load(Ordering::Relaxed);
+        if written >= self.total_size - 1 {
+            100
+        } else {
+            (written * 100 / self.total_size).min(100)
+        }
+    }
+}
+
+impl<W: Write> Write for ProgressTracker::<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result::<usize> {
+        let written = self.writer.write(buf)?;
+        self.written.fetch_add(written as u64, Ordering::Relaxed);
+
+        let p = self.progress();
+        if p % 5 == 0 {
+            let msg = format!("data: {{ \"progress\": {p} }}\n\n");
+            let file_path = self.file_path;
+            if let Some(writer) = self.clients.lock().unwrap().get_mut(file_path) {
+                if writer.write_all(msg.as_bytes()).is_err() {
+                    eprintln!("error: client disconnected from /{file_path}/progress");
+                }
+            }
+        }
+
+        Ok(written)
+    }
+
+    #[inline(always)]
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
 #[inline]
 fn serve_bytes(request: Request, bytes: &[u8], content_type: &str) -> Result::<()> {
     let content_type_header = unsafe {
@@ -65,7 +128,7 @@ fn serve_bytes(request: Request, bytes: &[u8], content_type: &str) -> Result::<(
     Ok(())
 }
 
-fn handle_upload(rq: &mut Request) -> Result::<()> {
+fn handle_upload(rq: &mut Request, clients: AtomicClients) -> Result::<()> {
     let content_type = rq.headers()
         .iter()
         .find(|header| header.field.equiv("Content-Type"))
@@ -78,37 +141,72 @@ fn handle_upload(rq: &mut Request) -> Result::<()> {
 
     let boundary = content_type_value["multipart/form-data; boundary=".len()..].to_owned();
     let mut multipart = Multipart::with_body(rq.as_reader(), boundary);
-    
-    while let Some(mut field) = multipart.read_entry()? {
-        let Some(file_path) = field.headers.filename.map(FilePath) else { continue };
-        println!("[{file_path}] creating file");
-        let file = File::create(&file_path.0)?;
-        let wbuf = BufWriter::new(file);
-        println!("[{file_path}] copying data..");
-        field.data.save().size_limit(SIZE_LIMIT).write_to(wbuf);
-        println!("[{file_path}] done!");
-    }
+
+    let file_size = multipart.read_entry()?.map(|mut field| {
+        if field.headers.name == "size".into() {
+            let mut buf = String::with_capacity(20);
+            field.data.read_to_string(&mut buf).unwrap();
+            Some(buf.trim().parse().unwrap())
+        } else {
+            None
+        }
+    }).unwrap().unwrap();
+
+    let mut field = multipart.read_entry()?.unwrap();
+
+    let file_path = field.headers.filename.map(|f| FilePath(f.into())).unwrap();
+    println!("[{file_path}] creating file");
+
+    let file = File::create(file_path.0.as_str())?;
+    let wbuf = BufWriter::new(file);
+    let writer = ProgressTracker::new(wbuf, file_size, &file_path.0, Arc::clone(&clients));
+
+    println!("[{file_path}] copying data..");
+    field.data.save().size_limit(SIZE_LIMIT).write_to(writer);
+    println!("[{file_path}] done!");
+
+    _ = clients.lock().unwrap().remove_entry(&file_path.0);
 
     Ok(())
 }
 
 fn server_serve(server: &Server, stop: &AtomicStop) {
+    let clients = Arc::new(Mutex::new(Clients::new()));
+
     println!("serving at: <http://{ADDR_PORT}>");
     server.incoming_requests().par_bridge().for_each(|mut rq| {
         if stop.load(Ordering::SeqCst) {
-            println!("[INFO] Shutting down the server.");
+            println!("[INFO] shutting down the server.");
             server.unblock()
         }
 
         if let Err(err) = match (rq.method(), rq.url()) {
             (&Method::Get, "/") => serve_bytes(rq, HOME_HTML, "text/html; charset=UTF-8"),
+            (&Method::Get, "/index.js") => serve_bytes(rq, HOME_SCRIPT, "application/js; charset=UTF-8"),
             (&Method::Post, "/upload") => {
-                match handle_upload(&mut rq) {
+                match handle_upload(&mut rq, Arc::clone(&clients)) {
                     Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
-                    _ => rq.respond(Response::from_string("OK").with_status_code(StatusCode(200))),
+                    _ => rq.respond(Response::empty(StatusCode(200))),
                 }.map_err(Into::into)
             },
-            _ => serve_bytes(rq, NOT_FOUND_HTML, "text/html; charset=UTF-8")
+            (&Method::Get, path) => if path.starts_with("/progress") {
+                let file_path = &path["/progress".len() + 1..];
+                let response = Response::empty(StatusCode(200))
+                    .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
+                    .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
+                    .with_header(Header::from_bytes("Connection", "keep-alive").unwrap());
+
+                let file_path = file_path.to_owned();
+                let stream = rq.upgrade("SSE", response);
+
+                println!("[INFO] client connected to <http://{ADDR_PORT}/{file_path}/progress>");
+                clients.lock().unwrap().insert(file_path, stream);
+
+                Ok(())
+            } else {
+                serve_bytes(rq, NOT_FOUND_HTML, "text/html; charset=UTF-8")
+            }
+            _ => Ok(())
         } {
             eprintln!("{err}")
         }
