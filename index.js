@@ -57,9 +57,6 @@ function listenToProgress(fileName, message) {
         try {
             const { progress } = JSON.parse(event.data);
             message.textContent = `Uploading ${fileName}: ${progress}%`;
-
-            console.log(progress);
-
             if (progress >= 100) {
                 message.textContent = `${fileName} upload complete!`;
                 message.classList.add('success');

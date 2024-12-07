@@ -1,12 +1,10 @@
 use std::fs::File;
 use std::fmt::Display;
-use std::thread::sleep;
-use std::time::Duration;
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::io::{Read, Write, BufWriter};
-use std::sync::atomic::{Ordering, AtomicBool, AtomicU64};
+use std::sync::atomic::{Ordering, AtomicBool};
 
 use anyhow::Result;
 use raylib_light::CloseWindow;
@@ -20,7 +18,6 @@ mod qr;
 use qr::*;
 
 const SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
-const PROGRESS_CONNECTION_PRECLOSE_DELAY: u64 = 250; // millis
 const DUMMY_HTTP_RQ: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 
 const NOT_FOUND_HTML: &[u8] = b"<h1>NOT FOUND</h1>";
@@ -77,8 +74,8 @@ impl Display for FilePath {
 
 struct ProgressTracker<'a, W: Write> {
     writer: W,
+    written: u64,
     total_size: u64,
-    written: Arc::<AtomicU64>,
     file_path: &'a String,
     clients: AtomicClients
 }
@@ -89,7 +86,7 @@ impl<'a, W: Write> ProgressTracker::<'a, W> {
         Self {
             writer,
             total_size,
-            written: Arc::new(AtomicU64::new(0)),
+            written: 0,
 
             file_path,
             clients
@@ -98,11 +95,10 @@ impl<'a, W: Write> ProgressTracker::<'a, W> {
 
     #[inline]
     pub fn progress(&self) -> u64 {
-        let written = self.written.load(Ordering::Relaxed);
-        if written >= self.total_size - 1 {
+        if self.written >= self.total_size - 1 {
             100
         } else {
-            (written * 100 / self.total_size).min(100)
+            (self.written * 100 / self.total_size).min(100)
         }
     }
 }
@@ -110,16 +106,17 @@ impl<'a, W: Write> ProgressTracker::<'a, W> {
 impl<W: Write> Write for ProgressTracker::<'_, W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result::<usize> {
         let written = self.writer.write(buf)?;
-        self.written.fetch_add(written as u64, Ordering::Relaxed);
+        self.written += written as u64;
 
         let p = self.progress();
         if p % 5 == 0 {
-            let msg = format!("data: {{ \"progress\": {p} }}\n\n");
-            let file_path = self.file_path;
             let mut clients = self.clients.lock().unwrap();
-            let writer = clients.get_mut(file_path).unwrap();
-            if writer.write_all(msg.as_bytes()).is_err() {
-                eprintln!("error: client disconnected from /{file_path}/progress");
+            if let Some(writer) = clients.get_mut(self.file_path) {
+                let file_path = self.file_path;
+                let msg = format!("data: {{ \"progress\": {p} }}\n\n");
+                if writer.write_all(msg.as_bytes()).is_err() {
+                    eprintln!("error: client disconnected from /{file_path}/progress");
+                }
             }
         }
 
@@ -184,9 +181,9 @@ fn handle_upload(rq: &mut Request, clients: AtomicClients) -> Result::<()> {
         if writer.write_all(b"data: {{ \"progress\": 100 }}\n\n").is_err() {
             eprintln!("error: client disconnected from /{file_path}/progress");
         }
+        writer.flush().unwrap();
     }
 
-    sleep(Duration::from_millis(PROGRESS_CONNECTION_PRECLOSE_DELAY));
     _ = clients.lock().unwrap().remove_entry(&file_path.0);
 
     Ok(())
@@ -212,6 +209,7 @@ fn server_serve(server: &Server, stop: &AtomicStop) {
                 }.map_err(Into::into)
             },
             (&Method::Get, path) => if path.starts_with("/progress") {
+                let file_path = &path["/progress".len() + 1..];
                 let file_path = &path["/progress".len() + 1..];
                 let response = Response::empty(StatusCode(200))
                     .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
