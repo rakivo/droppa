@@ -21,13 +21,5 @@ jobs:
     - uses: actions/checkout@v3
     
     - name: Build on Linux or Windows
-      run: |
-        if [ "${{ runner.os }}" == "Linux" ]; then
-          chmod +x ./build.sh
-          ./build.sh
-        elif [ "${{ runner.os }}" == "Windows" ]; then
-          .\build.bat
-        else
-          cargo build --verbose
-        fi
+      run: cargo build --verbose
       shell: bash
