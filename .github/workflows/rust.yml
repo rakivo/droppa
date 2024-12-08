@@ -1,0 +1,29 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Build on Linux or Windows
+      run: |
+        if [ "${{ runner.os }}" == "Linux" ]; then
+          chmod +x ./build.sh
+          ./build.sh
+        elif [ "${{ runner.os }}" == "Windows" ]; then
+          .\build.bat
+      shell: bash
