@@ -1,3 +1,22 @@
+window.addEventListener('load', () => {
+    const qrcodeContainer = document.getElementById('qrcode-container');
+    
+    fetch('/qr.png').then(response => {
+        if (!response.ok) {
+            throw new Error('Failed to fetch QR code');
+        }
+        return response.blob();
+    }).then(blob => {
+        const img = document.createElement('img');
+        img.src = URL.createObjectURL(blob);
+        qrcodeContainer.innerHTML = '';
+        qrcodeContainer.appendChild(img);
+    }).catch(error => {
+        qrcodeContainer.innerHTML = '<span class="error">Error loading QR Code</span>';
+        console.error(error);
+    });
+});
+
 document.getElementById('upload-button').addEventListener('click', async () => {
     const fileInput = document.getElementById('file-input');
     const statusDiv = document.getElementById('status');

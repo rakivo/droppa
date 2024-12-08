@@ -63,6 +63,28 @@
       .progress {
           color: blue;
       }
+      #qrcode-container {
+          position: absolute;
+          top: 20px;
+          right: 20px;
+          width: 240px;
+          height: 240px;
+          background: #ddd;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border: 2px dashed #ccc;
+          border-radius: 10px;
+          overflow: hidden;
+      }
+      #qrcode-container img {
+          max-width: 100%;
+          max-height: 100%;
+      }
+      #qrcode-container span {
+          font-size: 14px;
+          color: #888;
+      }
     </style>
   </head>
   <body>
@@ -72,6 +94,9 @@
       <button type="button" id="upload-button">Upload</button>
     </form>
     <div id="status"></div>
+    <div id="qrcode-container">
+      <span>Loading QR Code...</span>
+    </div>
     <script src="index.js"></script>
   </body>
 </html>

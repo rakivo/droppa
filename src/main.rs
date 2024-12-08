@@ -1,13 +1,10 @@
 use std::fs::File;
 use std::fmt::Display;
-use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::io::{Read, Write, BufWriter};
-use std::sync::atomic::{Ordering, AtomicBool};
 
 use anyhow::Result;
-use raylib_light::CloseWindow;
 use multipart::server::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
 use get_if_addrs::{IfAddr, get_if_addrs};
@@ -16,17 +13,17 @@ use tiny_http::{ReadWrite, Header, Method, Request, Response, StatusCode, Server
 
 mod qr;
 use qr::*;
+#[allow(unused_imports, unused_parens, non_camel_case_types, unused_mut, dead_code, unused_assignments, unused_variables, static_mut_refs, non_snake_case, non_upper_case_globals)]
+mod stb_image_write;
 
 const SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
 
 const HOME_HTML:      &[u8] = include_bytes!("index.html");
 const HOME_SCRIPT:    &[u8] = include_bytes!("index.js");
-const DUMMY_HTTP_RQ:  &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 const NOT_FOUND_HTML: &[u8] = b"<h1>NOT FOUND</h1>";
 
 type Clients = HashMap::<String, Box::<dyn ReadWrite + Send>>;
 
-type AtomicStop = Arc::<AtomicBool>;
 type AtomicClients = Arc::<Mutex::<Clients>>;
 
 macro_rules! define_addr_port {
@@ -140,16 +137,16 @@ impl<W: Write> Write for ProgressTracker::<'_, W> {
 }
 
 struct Server {
-    stop: AtomicStop,
+    qr_png_bytes: Vec::<u8>,
     server: TinyHttpServer,
     clients: AtomicClients,
     sse_response: Response::<std::io::Empty>
 }
 
 impl Server {
-    fn new(stop: AtomicStop) -> Self {
+    fn new(qr_png_bytes: Vec::<u8>) -> Self {
         Self {
-            stop,
+            qr_png_bytes,
             server: TinyHttpServer::http(ADDR_PORT).unwrap(),
             clients: Arc::new(Mutex::new(Clients::new())),
             sse_response: Response::empty(200)
@@ -219,6 +216,7 @@ impl Server {
     fn handle_rq(&self, mut rq: Request) -> Result::<()> {
         match (rq.method(), rq.url()) {
             (&Method::Get, "/") => serve_bytes(rq, HOME_HTML, "text/html; charset=UTF-8"),
+            (&Method::Get, "/qr.png") => serve_bytes(rq, &self.qr_png_bytes, "image/png; charset=UTF-8"),
             (&Method::Get, "/index.js") => serve_bytes(rq, HOME_SCRIPT, "application/js; charset=UTF-8"),
             (&Method::Post, "/upload") => {
                 match self.handle_upload(&mut rq) {
@@ -247,11 +245,6 @@ impl Server {
     fn serve(&mut self) {
         println!("serving at: <http://{ADDR_PORT}>");
         self.server.incoming_requests().par_bridge().for_each(|rq| {
-            if self.stop.load(Ordering::SeqCst) {
-                println!("[INFO] shutting down the server.");
-                self.server.unblock()
-            }
-
             _ = self.handle_rq(rq).inspect_err(|e| eprintln!("{e}"));
         });
     }
@@ -261,13 +254,6 @@ impl Server {
 fn serve_bytes(request: Request, bytes: &[u8], content_type: &str) -> Result::<()> {
     let content_type_header = Header::from_bytes("Content-Type", content_type).expect("invalid header string");
     request.respond(Response::from_data(bytes).with_header(content_type_header))?;
-    Ok(())
-}
-
-#[inline]
-fn dummy_http_rq(addr: &str) -> std::io::Result::<()> {
-    let mut stream = TcpStream::connect(addr)?;
-    stream.write_all(DUMMY_HTTP_RQ)?;
     Ok(())
 }
 
@@ -284,30 +270,12 @@ fn main() -> Result::<()> {
         panic!("could not local ipv4 address of the network interface")
     };
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let stopc = Arc::clone(&stop);
-
-    let server_thread = std::thread::spawn(move || {
-        let mut server = Server::new(stopc);
-        server.serve()
-    });
-
     let local_addr = format!("http://{local_ip:?}:{PORT}");
     let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode url to qr code");
-    unsafe {
-        init_raylib();
-        draw_qr_code(gen_qr_canvas(&qr));
-        CloseWindow()
-    }
+    let qr_png_bytes = gen_qr_png_bytes(&qr).expect("could not generate a qr-code image");
 
-    stop.store(true, Ordering::SeqCst);
-
-    // send a dummy request to unblock `incoming_requests`
-    if let Err(e) = dummy_http_rq(ADDR_PORT) {
-        eprintln!("error: could not send a dummy request to {ADDR_PORT} to `incoming_requests` to shut down the server: {e}")
-    }
-
-    server_thread.join().unwrap();
+    let mut server = Server::new(qr_png_bytes);
+    server.serve();
 
     Ok(())
 }

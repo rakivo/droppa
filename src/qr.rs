@@ -1,50 +1,47 @@
-extern crate raylib_light as raylib;
-
-use raylib::*;
 use qrcodegen::QrCode;
 
-const SCALE: u32 = 8;
-const QR_SIZE: u32 = 25;
-const QUIET_ZONE: u32 = 1;
-const QUIET_ZONE_SIZE: i32 = 10;
-const IMAGE_SIZE: u32 = (QR_SIZE + 2 * QUIET_ZONE) * SCALE;
+use crate::stb_image_write::*;
 
-pub unsafe fn gen_qr_canvas(qr: &QrCode) -> Texture2D {
-    let canvas = LoadRenderTexture(IMAGE_SIZE as i32, IMAGE_SIZE as i32);
-    BeginTextureMode(canvas);
-    ClearBackground(WHITE);
+const SCALE: usize = 10;
+const BORDER: usize = 2;
 
-    for y in 0..QR_SIZE {
-        for x in 0..QR_SIZE {
-            let color = if qr.get_module(x as i32, y as i32) { BLACK } else { WHITE };
-            let y = QR_SIZE - 1 - y;
-            for dy in 0..SCALE {
-                for dx in 0..SCALE {
-                    let px = (x + QUIET_ZONE) * SCALE + dx;
-                    let py = (y + QUIET_ZONE) * SCALE + dy;
-                    DrawPixel(px as i32, py as i32, color);
+pub fn gen_qr_png_bytes(qr: &QrCode) -> Result::<Vec::<u8>, ()> {
+    let size = qr.size() as usize;
+    let img_size = (size + 2 * BORDER) * SCALE;
+
+    let mut image = vec![255u8; img_size * img_size];
+    for y in 0..size {
+        for x in 0..size {
+            if qr.get_module(x as _, y as _) {
+                for dy in 0..SCALE {
+                    for dx in 0..SCALE {
+                        let px = (BORDER + x) * SCALE + dx;
+                        let py = (BORDER + y) * SCALE + dy;
+                        image[py * img_size + px] = 0;
+                    }
                 }
             }
         }
     }
 
-    EndTextureMode();
-    canvas.texture
+    unsafe { write_png_to_memory(&image, img_size as _, img_size as _) }
 }
 
-pub unsafe fn init_raylib() {
-    SetTraceLogLevel(TraceLogLevel::Error as _);
-    SetWindowState(ConfigFlags::WindowHidden as u32 | ConfigFlags::WindowUndecorated as u32);
-    InitWindow(230 + QUIET_ZONE_SIZE, 230 + QUIET_ZONE_SIZE, cstr!("qr"));
-    SetTargetFPS(30);
-}
+pub unsafe fn write_png_to_memory(image: &[u8], width: i32, height: i32) -> Result::<Vec::<u8>, ()> {
+    let mut out_len = 0;
 
-pub unsafe fn draw_qr_code(qr_texture: Texture2D) {
-    ClearWindowState(ConfigFlags::WindowHidden as _);
-    while !WindowShouldClose() {
-        BeginDrawing();
-        ClearBackground(WHITE);
-        DrawTexture(qr_texture, QUIET_ZONE_SIZE + 2, QUIET_ZONE_SIZE + 1, WHITE);
-        EndDrawing();
+    let ret = stbi_write_png_to_mem(
+        image.as_ptr(),
+        width,
+        width,
+        height,
+        1,
+        &mut out_len as *mut i32
+    );
+
+    if !ret.is_null() {
+        Ok(std::slice::from_raw_parts_mut(ret, out_len as usize).to_vec())
+    } else {
+        Err(())
     }
 }
