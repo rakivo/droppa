@@ -15,15 +15,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, macos-11, ubuntu-latest]
 
     steps:
     - uses: actions/checkout@v3
-    - name: Build on Linux or Windows
+    
+    - name: Build on Linux or Windows or macOS
       run: |
         if [ "${{ runner.os }}" == "Linux" ]; then
           chmod +x ./build.sh
           ./build.sh
         elif [ "${{ runner.os }}" == "Windows" ]; then
           .\build.bat
+        else
+          cargo build --verbose
       shell: bash
