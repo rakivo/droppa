@@ -51,27 +51,33 @@ define_addr_port!{
 
 struct FilePath(String);
 
-impl FilePath { const MAX_LEN: usize = 30; }
+impl FilePath {
+    const MAX_LEN: usize = 30;
+    const DOTS: &str = "[...]";
 
-impl Display for FilePath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let FilePath(ref full_file_path) = self;
-
-        let ext_pos = full_file_path.rfind('.').unwrap_or(full_file_path.len());
-        let (name_part, ext_part) = full_file_path.split_at(ext_pos);
-
-        if full_file_path.len() > Self::MAX_LEN {
-            const DOTS: &str = "[...]";
-            let trim_len = Self::MAX_LEN - ext_part.len() - const { DOTS.len() };
+    fn new(full_file_path: String) -> Self {
+        let s = if full_file_path.len() > Self::MAX_LEN {
+            let ext_pos = full_file_path.rfind('.').unwrap_or(full_file_path.len());
+            let (name_part, ext_part) = full_file_path.split_at(ext_pos);
+            let trim_len = Self::MAX_LEN - ext_part.len() - const { Self::DOTS.len() };
             let trimmed_name = if trim_len > 0 {
                 &name_part[..trim_len]
             } else {
                 "" // ext too long
             };
-            write!(f, "{trimmed_name}{DOTS}{ext_part}")
+            format!("{trimmed_name}{dots}{ext_part}", dots = Self::DOTS)
         } else {
-            write!(f, "{full_file_path}")
-        }
+            full_file_path
+        };
+
+        Self(s)
+    }
+}
+
+impl Display for FilePath {
+    #[inline(always)]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -184,7 +190,7 @@ impl Server {
             return anyerr!("Invalid Multipart data")
         };
 
-        let file_path = field.headers.filename.map(|f| FilePath(f.into())).unwrap();
+        let file_path = field.headers.filename.map(|f| FilePath::new(f.into())).unwrap();
 
         println!("[{file_path}] creating file");
         let file = File::create(file_path.0.as_str())?;
