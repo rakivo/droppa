@@ -18,11 +18,11 @@ mod qr;
 use qr::*;
 
 const SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
-const DUMMY_HTTP_RQ: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 
+const HOME_HTML:      &[u8] = include_bytes!("index.html");
+const HOME_SCRIPT:    &[u8] = include_bytes!("index.js");
+const DUMMY_HTTP_RQ:  &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 const NOT_FOUND_HTML: &[u8] = b"<h1>NOT FOUND</h1>";
-const HOME_HTML: &[u8] = include_bytes!("index.html");
-const HOME_SCRIPT: &[u8] = include_bytes!("index.js");
 
 type Clients = HashMap::<String, Box::<dyn ReadWrite + Send>>;
 
@@ -100,12 +100,11 @@ impl<'a, W: Write> ProgressTracker::<'a, W> {
         let p = self.progress();
         if p % 5 == 0 {
             let mut clients = self.clients.lock().unwrap();
-            let writer = clients.get_mut(self.file_path).unwrap();
-            let file_path = self.file_path;
-            let msg = format!("data: {{ \"progress\": {p} }}\n\n");
-            #[cfg(debug_assertions)]
-            if let Err(e) = writer.write_all(msg.as_bytes()) {
-                eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{file_path}, or error occured: {e}")
+            if let Some(writer) = clients.get_mut(self.file_path) {
+                let msg = format!("data: {{ \"progress\": {p} }}\n\n");
+                if let Err(e) = writer.write_all(msg.as_bytes()) {
+                    eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{fp}, or error occured: {e}", fp = self.file_path)
+                }
             }
         }
     }
@@ -147,7 +146,7 @@ impl Server {
             stop,
             server: TinyHttpServer::http(ADDR_PORT).unwrap(),
             clients: Arc::new(Mutex::new(Clients::new())),
-            sse_response: Response::empty(StatusCode(200))
+            sse_response: Response::empty(200)
                 .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
                 .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
                 .with_header(Header::from_bytes("Connection", "keep-alive").unwrap()),
@@ -198,12 +197,14 @@ impl Server {
 
         {
             let mut clients = self.clients.lock().unwrap();
-            let writer = clients.get_mut(&file_path.0).unwrap();
-            #[cfg(debug_assertions)]
-            if let Err(e) = writer.write_all(b"data: {{ \"progress\": 100 }}\n\n") {
-                eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{file_path}, or error occured: {e}")
+            if let Some(writer) = clients.get_mut(&file_path.0) {
+                #[allow(unused)]
+                if let Err(e) = writer.write_all(b"data: {{ \"progress\": 100 }}\n\n") {
+                    #[cfg(debug_assertions)]
+                    eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{file_path}, or error occured: {e}")
+                }
+                _ = writer.flush()
             }
-            _ = writer.flush()
         }
 
         Ok(file_path)
@@ -217,14 +218,16 @@ impl Server {
                 match self.handle_upload(&mut rq) {
                     Ok(fp) => {
                         _ = self.clients.lock().unwrap().remove_entry(&fp.0);
-                        rq.respond(Response::empty(StatusCode(200)))
+                        rq.respond(Response::empty(200))
                     }
                     Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
                 }.map_err(Into::into)
             },
             (&Method::Get, path) => if path.starts_with("/progress") {
                 let file_path = path[const { "/progress".len() + 1 }..].to_owned();
-                let stream = rq.upgrade("SSE", self.sse_response.clone());
+                let mut stream = rq.upgrade("SSE", self.sse_response.clone());
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")?;
+                stream.flush()?;
                 println!("[INFO] client connected to <http://{ADDR_PORT}/progress/{file_path}>");
                 self.clients.lock().unwrap().insert(file_path, stream);
                 Ok(())

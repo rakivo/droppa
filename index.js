@@ -31,38 +31,13 @@ async function uploadFile(file, statusDiv) {
     statusDiv.appendChild(message);
 
     try {
-await new Promise((resolve, reject) => {
-            const eventSource = new EventSource(`/progress/${file.name}`);
-            let isComplete = false;
+        console.log(`Opening progress connection for ${file.name}..`);
+        const eventSource = await openProgressConnection(file);
 
-            eventSource.onmessage = (event) => {
-                const progressData = JSON.parse(event.data);
-                if (progressData.progress !== undefined) {
-                    const progress = progressData.progress;
-                    message.textContent = `${file.name}: Upload progress: ${progress}%`;
+        console.log("Connection opened");
+        trackProgress(eventSource, file, message);
 
-                    if (progress === 100) {
-                        message.textContent = `${file.name} uploaded successfully!`;
-                        message.classList.add('success');
-                        isComplete = true;
-                        eventSource.close(); // Close the connection after 100% progress
-                        resolve(); // Resolve the promise
-                    }
-                }
-            };
-
-            eventSource.onerror = (error) => {
-                console.error(`Error on progress connection for ${file.name}`, error);
-                if (!isComplete) {
-                    message.textContent = `${file.name}: Error establishing progress connection.`;
-                    message.classList.add('error');
-                    eventSource.close();
-                    reject(new Error(`Progress connection failed for ${file.name}`));
-                }
-            };
-        });
-
-        // Proceed to upload the file
+        console.log("Sending upload request..");
         const response = await fetch('/upload', {
             method: 'POST',
             body: formData,
@@ -81,4 +56,49 @@ await new Promise((resolve, reject) => {
         message.textContent = `${file.name} error: ${error.message}`;
         message.classList.add('error');
     }
+}
+
+async function openProgressConnection(file) {
+    return new Promise((resolve, reject) => {
+        const eventSource = new EventSource(`/progress/${file.name}`);
+
+        eventSource.onopen = () => {
+            console.log(`Progress connection for ${file.name} established.`);
+            resolve(eventSource);
+        };
+
+        eventSource.onerror = (error) => {
+            console.error(`Error on opening progress connection for ${file.name}`, error);
+            eventSource.close();
+            reject(new Error(`Progress connection failed for ${file.name}`));
+        };
+    });
+}
+
+function trackProgress(eventSource, file, message) {
+    let isComplete = false;
+
+    eventSource.onmessage = (event) => {
+        const progressData = JSON.parse(event.data);
+        if (progressData.progress !== undefined) {
+            const progress = progressData.progress;
+            message.textContent = `${file.name}: Upload progress: ${progress}%`;
+
+            if (progress === 100) {
+                message.textContent = `${file.name} uploaded successfully!`;
+                message.classList.add('success');
+                isComplete = true;
+                eventSource.close();
+            }
+        }
+    };
+
+    eventSource.onerror = (error) => {
+        console.error(`Error on progress connection for ${file.name}`, error);
+        if (!isComplete) {
+            message.textContent = `${file.name}: Error establishing progress connection.`;
+            message.classList.add('error');
+            eventSource.close();
+        }
+    };
 }
