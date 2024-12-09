@@ -112,13 +112,9 @@ impl<'a, W: Write> ProgressTracker::<'a, W> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn progress(&self) -> u64 {
-        if self.written >= self.total_size - 1 {
-            100
-        } else {
-            (self.written * 100 / self.total_size).min(100)
-        }
+        (self.written * 100 / self.total_size).min(100)
     }
 }
 
