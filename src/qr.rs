@@ -9,16 +9,15 @@ pub fn gen_qr_png_bytes(qr: &QrCode) -> Result::<Vec::<u8>, ()> {
     let size = qr.size() as usize;
     let img_size = (size + 2 * BORDER) * SCALE;
 
-    let mut image = vec![255u8; img_size * img_size];
+    let mut image = vec![0xFF; img_size * img_size];
     for y in 0..size {
         for x in 0..size {
-            if qr.get_module(x as _, y as _) {
-                for dy in 0..SCALE {
-                    for dx in 0..SCALE {
-                        let px = (BORDER + x) * SCALE + dx;
-                        let py = (BORDER + y) * SCALE + dy;
-                        image[py * img_size + px] = 0;
-                    }
+            if !qr.get_module(x as _, y as _) { continue }
+            for dy in 0..SCALE {
+                for dx in 0..SCALE {
+                    let px = (BORDER + x) * SCALE + dx;
+                    let py = (BORDER + y) * SCALE + dy;
+                    image[py * img_size + px] = 0;
                 }
             }
         }

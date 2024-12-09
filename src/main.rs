@@ -1,8 +1,9 @@
 use std::fs::File;
 use std::fmt::Display;
-use std::sync::{Arc, Mutex};
+use std::net::Ipv4Addr;
 use std::collections::HashMap;
 use std::io::{Read, Write, BufWriter};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Result;
 use multipart::server::Multipart;
@@ -18,9 +19,10 @@ mod stb_image_write;
 
 const SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
 
-const HOME_HTML:      &[u8] = include_bytes!("index.html");
-const HOME_SCRIPT:    &[u8] = include_bytes!("index.js");
-const NOT_FOUND_HTML: &[u8] = b"<h1>NOT FOUND</h1>";
+const HOME_HTML:        &[u8] = include_bytes!("index.html");
+const HOME_SCRIPT:      &[u8] = include_bytes!("index.js");
+const NOT_FOUND_HTML:   &[u8] = b"<h1>NOT FOUND</h1>";
+const HTTP_OK_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
 
 type Clients = HashMap::<String, Box::<dyn ReadWrite + Send>>;
 
@@ -35,6 +37,11 @@ macro_rules! define_addr_port {
         #[allow(unused)]
         const ADDR_PORT: &str = concat!($addr, ':', $port);
     };
+}
+
+macro_rules! progress_fmt {
+    ($lit: literal) => { concat!("data: {{ \"progress\": ", $lit, "}}\n\n") };
+    ($expr: expr) => { format!("data: {{ \"progress\": {} }}\n\n", $expr) };
 }
 
 macro_rules! anyerr {
@@ -74,7 +81,7 @@ impl FilePath {
 impl Display for FilePath {
     #[inline(always)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{fp}", fp = self.0)
     }
 }
 
@@ -101,14 +108,11 @@ impl<'a, W: Write> ProgressTracker::<'a, W> {
 
     fn report_progress_if_needed(&mut self) {
         let p = self.progress();
-        if p % 5 == 0 {
-            let mut clients = self.clients.lock().unwrap();
-            if let Some(writer) = clients.get_mut(self.file_path) {
-                let msg = format!("data: {{ \"progress\": {p} }}\n\n");
-                if let Err(e) = writer.write_all(msg.as_bytes()) {
-                    eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{fp}, or error occured: {e}", fp = self.file_path)
-                }
-            }
+        if p % 5 != 0 { return }
+        let mut clients = self.clients.lock().unwrap();
+        let Some(writer) = clients.get_mut(self.file_path) else { return };
+        if let Err(e) = writer.write_all(progress_fmt!(p).as_bytes()) {
+            eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{fp}, or error occured: {e}", fp = self.file_path)
         }
     }
 
@@ -150,6 +154,12 @@ impl Server {
                 .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
                 .with_header(Header::from_bytes("Connection", "keep-alive").unwrap()),
         }
+    }
+
+    #[track_caller]
+    #[inline(always)]
+    fn clients(&self) -> MutexGuard::<Clients> {
+        self.clients.lock().unwrap()
     }
 
     fn handle_upload(&self, rq: &mut Request) -> Result::<FilePath> {
@@ -195,10 +205,10 @@ impl Server {
         println!("[{file_path}] done!");
 
         {
-            let mut clients = self.clients.lock().unwrap();
+            let mut clients = self.clients();
             if let Some(writer) = clients.get_mut(&file_path.0) {
                 #[allow(unused)]
-                if let Err(e) = writer.write_all(b"data: {{ \"progress\": 100 }}\n\n") {
+                if let Err(e) = writer.write_all(const { progress_fmt!("100").as_bytes() }) {
                     #[cfg(debug_assertions)]
                     eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{file_path}, or error occured: {e}")
                 }
@@ -217,7 +227,7 @@ impl Server {
             (&Method::Post, "/upload") => {
                 match self.handle_upload(&mut rq) {
                     Ok(fp) => {
-                        _ = self.clients.lock().unwrap().remove_entry(&fp.0);
+                        _ = self.clients().remove_entry(&fp.0);
                         rq.respond(Response::empty(200))
                     }
                     Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
@@ -226,10 +236,10 @@ impl Server {
             (&Method::Get, path) => if path.starts_with("/progress") {
                 let file_path = path[const { "/progress".len() + 1 }..].to_owned();
                 let mut stream = rq.upgrade("SSE", self.sse_response.clone());
-                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")?;
+                stream.write_all(HTTP_OK_RESPONSE)?;
                 stream.flush()?;
                 println!("[INFO] client connected to <http://{ADDR_PORT}/progress/{file_path}>");
-                self.clients.lock().unwrap().insert(file_path, stream);
+                self.clients().insert(file_path, stream);
                 Ok(())
             } else {
                 serve_bytes(rq, NOT_FOUND_HTML, "text/html; charset=UTF-8")
@@ -241,7 +251,7 @@ impl Server {
     fn serve(&mut self) {
         println!("serving at: <http://{ADDR_PORT}>");
         self.server.incoming_requests().par_bridge().for_each(|rq| {
-            _ = self.handle_rq(rq).inspect_err(|e| eprintln!("{e}"));
+            _ = self.handle_rq(rq).inspect_err(|e| eprintln!("{e}"))
         });
     }
 }
@@ -253,8 +263,8 @@ fn serve_bytes(request: Request, bytes: &[u8], content_type: &str) -> Result::<(
     Ok(())
 }
 
-fn main() -> Result::<()> {
-    let Some(Some(local_ip)) = get_if_addrs()?.into_iter().find(|iface| {
+fn find_loopback_addr() -> Option::<Ipv4Addr> {
+    get_if_addrs().ok()?.into_iter().find(|iface| {
         !iface.is_loopback()
     }).map(|iface| {
         if let IfAddr::V4(addr) = iface.addr {
@@ -262,16 +272,19 @@ fn main() -> Result::<()> {
         } else {
             None
         }
-    }) else {
-        panic!("could not local ipv4 address of the network interface")
-    };
+    })?
+}
+
+fn main() -> Result::<()> {
+    let local_ip = find_loopback_addr().unwrap_or_else(|| {
+        panic!("could not find loopback ipv4 address")
+    });
 
     let local_addr = format!("http://{local_ip:?}:{PORT}");
     let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode url to qr code");
     let qr_png_bytes = gen_qr_png_bytes(&qr).expect("could not generate a qr-code image");
 
-    let mut server = Server::new(qr_png_bytes);
-    server.serve();
+    Server::new(qr_png_bytes).serve();
 
     Ok(())
 }
