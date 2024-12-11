@@ -49,6 +49,9 @@ document
   .addEventListener("drop", async function dropHandler(ev) {
     console.log("File(s) dropped");
 
+    const statusDiv = document.getElementById("status");
+    statusDiv.innerHTML = "";
+
     document.getElementById("drag_and_drop-menu").className =
       "drag_and_drop-menu";
     document.getElementById("menu").style.display = "flex";
@@ -65,7 +68,7 @@ document
       return;
     }
     const files = Array.from(ev.dataTransfer.items);
-    const uploadPromises = files.map((file) => uploadFile(file, statusDiv));
+    const uploadPromises = files.map((file) => uploadFile(file.getAsFile(), statusDiv));
     await Promise.all(uploadPromises);
   });
 
@@ -94,6 +97,8 @@ async function uploadFile(file, statusDiv) {
   const formData = new FormData();
   formData.append("size", file.size);
   formData.append("file", file);
+
+  console.log(`file size: ${file.size}`);
 
   const message = document.createElement("div");
   message.textContent = `Preparing upload for ${file.name}...`;
