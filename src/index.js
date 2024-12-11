@@ -67,9 +67,9 @@ document
       return;
     }
     const files = Array.from(ev.dataTransfer.items);
-    const uploadPromises = files
-      .toReversed()
-      .map((file) => uploadFile(file.getAsFile(), statusDiv));
+    const uploadPromises = files.map((file) =>
+      uploadFile(file.getAsFile(), statusDiv)
+    );
     await Promise.all(uploadPromises);
   });
 
@@ -99,6 +99,8 @@ async function uploadFile(file, statusDiv) {
   const formData = new FormData();
   formData.append("size", file.size);
   formData.append("file", file);
+
+  console.log(`file size: ${file.size}`);
 
   const message = document.createElement("div");
   message.classList.add("idle");
