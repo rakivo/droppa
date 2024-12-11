@@ -55,7 +55,7 @@
       #status {
         margin-top: 18px;
       }
-      .success {
+      .status-message {
         display: flex;
         align-items: center;
         justify-content: center;
@@ -65,7 +65,36 @@
         height: 40px;
         color: #000;
         border-radius: 6px;
+        gap: 5px;
+      }
+      .file_name {
+        max-width: 60%;
+        text-overflow: ellipsis;
+        overflow: hidden;
+        white-space: nowrap;
+      }
+      .status_message {
+      }
+      .success {
         background-color: #12a746;
+      }
+      .error {
+        background-color: #a71214;
+      }
+      .progress {
+        color: #000;
+      }
+      .idle {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: "Source Code Pro", monospace;
+        font-size: 25px;
+        background-color: #d9d9d9;
+        color: #000;
+        width: 400px;
+        border-radius: 6px;
+        height: 40px;
       }
       .error {
         display: flex;
@@ -78,6 +107,9 @@
         width: 400px;
         border-radius: 6px;
         height: 40px;
+        text-overflow: ellipsis;
+        overflow: hidden;
+        white-space: nowrap;
       }
       .progress {
         display: flex;
@@ -88,7 +120,11 @@
         border-radius: 6px;
         width: 400px;
         height: 40px;
+        background-color: blue;
         color: #000;
+        text-overflow: ellipsis;
+        overflow: hidden;
+        white-space: nowrap;
       }
       #qrcode-container {
         position: absolute;

@@ -54,6 +54,8 @@ document
     document.getElementById("menu").style.display = "flex";
     document.getElementById("menu-active").style.display = "none";
 
+    const statusDiv = document.getElementById("status");
+
     // Prevent default behavior (Prevent file from being opened)
     ev.preventDefault();
 
@@ -65,7 +67,9 @@ document
       return;
     }
     const files = Array.from(ev.dataTransfer.items);
-    const uploadPromises = files.map((file) => uploadFile(file, statusDiv));
+    const uploadPromises = files
+      .toReversed()
+      .map((file) => uploadFile(file.getAsFile(), statusDiv));
     await Promise.all(uploadPromises);
   });
 
@@ -75,7 +79,6 @@ document
     e.preventDefault();
     const fileInput = document.getElementById("file-input");
     const statusDiv = document.getElementById("status");
-    statusDiv.innerHTML = "";
 
     if (!fileInput.files.length) {
       const message = document.createElement("div");
@@ -86,7 +89,9 @@ document
     }
 
     const files = Array.from(fileInput.files);
-    const uploadPromises = files.map((file) => uploadFile(file, statusDiv));
+    const uploadPromises = files
+      .toReversed()
+      .map((file) => uploadFile(file, statusDiv));
     await Promise.all(uploadPromises);
   });
 
@@ -96,17 +101,23 @@ async function uploadFile(file, statusDiv) {
   formData.append("file", file);
 
   const message = document.createElement("div");
-  message.textContent = `Preparing upload for ${file.name}...`;
   message.classList.add("idle");
   message.classList.add("status-message");
+  const fileNameSpan = document.createElement("span");
+  fileNameSpan.classList.add("file_name");
+  const status = document.createElement("span");
+  status.classList.add("status_message");
+  fileNameSpan.textContent = file.name;
+  message.appendChild(fileNameSpan);
+  message.appendChild(status);
   statusDiv.appendChild(message);
 
   try {
-    console.log(`Opening progress connection for ${file.name}..`);
+    console.log(`Opening progress connection for `);
     const eventSource = await openProgressConnection(file);
 
     console.log("Connection opened");
-    trackProgress(eventSource, file, message);
+    trackProgress(eventSource, file, message, status);
 
     console.log("Sending upload request..");
     const response = await fetch("/upload", {
@@ -117,16 +128,16 @@ async function uploadFile(file, statusDiv) {
     if (!response.ok) {
       const errorText = await response.text();
       console.log(errorText);
-      message.textContent = `${file.name} FAILURE`;
-      message.classList.add("error");
+      status.textContent = `FAILURE`;
+      message.className = "status-message error";
       return;
     }
 
-    message.textContent = `${file.name} SUCCESS`;
-    message.classList.add("success");
+    status.textContent = `SUCCESS`;
+    message.className = "status-message success";
   } catch (error) {
-    message.textContent = `${file.name} FAILURE`;
-    message.classList.add("error");
+    message.textContent = `FAILURE`;
+    message.className = "status-message error";
   }
 }
 
@@ -150,19 +161,20 @@ async function openProgressConnection(file) {
   });
 }
 
-async function trackProgress(eventSource, file, message) {
+async function trackProgress(eventSource, file, message, status) {
   let isComplete = false;
 
   eventSource.onmessage = (event) => {
     const progressData = JSON.parse(event.data);
     if (progressData.progress !== undefined) {
       const progress = progressData.progress;
-      message.classList.add("success");
-      message.textContent = `${file.name}: Upload progress: ${progress}%`;
+      message.className = "status-message progress";
+
+      status.textContent = ` ${progress}%`;
 
       if (progress === 100) {
-        message.textContent = `${file.name} uploaded successfully!`;
-        message.classList.add("success");
+        status.textContent = `SUCCESS`;
+        message.className = "status-message success";
         isComplete = true;
         eventSource.close();
       }
