@@ -69,9 +69,18 @@ document
       return;
     }
     const files = Array.from(ev.dataTransfer.items);
-    files.forEach((file) =>
-      globalFiles.unshift({ status: "idle", file: file.getAsFile() })
-    );
+    files.forEach((file) => {
+      const { message, fileNameSpan, messageStatusDiv } = createMessage(file);
+
+      const fullFileObject = {
+        status: "idle",
+        file: file.getAsFile(),
+        message: message,
+        fileNameSpan: fileNameSpan,
+        messageStatusDiv: messageStatusDiv,
+      };
+      globalFiles.push(fullFileObject);
+    });
   });
 
 document
@@ -108,7 +117,7 @@ document.getElementById("file-input").addEventListener("change", (e) => {
       messageStatusDiv: messageStatusDiv,
     };
 
-    globalFiles.unshift(fullFileObject);
+    globalFiles.push(fullFileObject);
   });
   console.log(e);
 });
