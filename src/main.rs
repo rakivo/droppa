@@ -19,10 +19,12 @@ mod stb_image_write;
 
 const SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
 
-const HOME_HTML:        &[u8] = include_bytes!("index.html");
-const HOME_SCRIPT:      &[u8] = include_bytes!("index.js");
-const NOT_FOUND_HTML:   &[u8] = b"<h1>NOT FOUND</h1>";
-const HTTP_OK_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+const HOME_HTML:          &[u8] = include_bytes!("index.html");
+const HOME_SCRIPT:        &[u8] = include_bytes!("index.js");
+const HOME_MOBILE_HTML:   &[u8] = include_bytes!("index-mobile.html");
+const HOME_MOBILE_SCRIPT: &[u8] = include_bytes!("index-mobile.js");
+const NOT_FOUND_HTML:     &[u8] = b"<h1>NOT FOUND</h1>";
+const HTTP_OK_RESPONSE:   &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
 
 type Clients = HashMap::<String, Box::<dyn ReadWrite + Send>>;
 
@@ -136,6 +138,27 @@ impl<W: Write> Write for ProgressTracker::<'_, W> {
     }
 }
 
+#[inline(always)]
+fn get_header<'a>(rq: &'a Request, field: &str) -> Option::<&'a Header> {
+    rq.headers()
+        .iter()
+        .find(|header| header.field.as_str().as_str().eq_ignore_ascii_case(field))
+}
+
+#[inline]
+fn user_agent_is_mobile(user_agent: &str) -> bool {
+    [
+        "Mobile",        // General mobile indicator
+        "Android",       // Android devices
+        "iPhone",        // iPhones
+        "iPod",          // iPods
+        "BlackBerry",    // BlackBerry devices
+        "Windows Phone", // Windows Phones
+        "Opera Mini",    // Opera Mini browser
+        "IEMobile",      // Internet Explorer Mobile
+    ].iter().any(|keyword| user_agent.contains(keyword))
+}
+
 struct Server {
     qr_png_bytes: Vec::<u8>,
     server: TinyHttpServer,
@@ -163,14 +186,13 @@ impl Server {
     }
 
     fn handle_upload(&self, rq: &mut Request) -> Result::<FilePath> {
-        let content_type = rq.headers()
-            .iter()
-            .find(|header| header.field.equiv("Content-Type"))
-            .ok_or_else(|| anyhow::anyhow!("Missing Content-Type header"))?;
+        let Some(content_type) = get_header(&*rq, "Content-Type") else {
+            return anyerr!("request to `/upload` with no user-agent")
+        };
 
         let content_type_value = content_type.value.as_str();
         if !content_type_value.starts_with("multipart/form-data; boundary=") {
-            return anyerr!("Invalid Content-Type")
+            return anyerr!("invalid Content-Type")
         }
 
         let boundary = content_type_value["multipart/form-data; boundary=".len()..].to_owned();
@@ -186,19 +208,23 @@ impl Server {
                 None
             }
         }) else {
-            return anyerr!("Invalid Multipart data")
+            return anyerr!("invalid Multipart data")
         };
 
         let Ok(Some(mut field)) = multipart.read_entry() else {
-            return anyerr!("Invalid Multipart data")
+            return anyerr!("invalid Multipart data")
         };
 
-        let file_path = field.headers.filename.map(|f| FilePath::new(f.into())).unwrap();
+        let Some(file_path_string) = field.headers.filename else {
+            return anyerr!("invalid Multipart data")
+        };
+
+        let file_path = FilePath::new(file_path_string.to_owned());
 
         println!("[{file_path}] creating file");
-        let file = File::create(file_path.0.as_str())?;
+        let file = File::create(&file_path_string)?;
         let wbuf = BufWriter::new(file);
-        let writer = ProgressTracker::new(wbuf, file_size, &file_path.0, Arc::clone(&self.clients));
+        let writer = ProgressTracker::new(wbuf, file_size, &file_path_string, Arc::clone(&self.clients));
 
         println!("[{file_path}] copying data..");
         field.data.save().size_limit(SIZE_LIMIT).write_to(writer);
@@ -221,9 +247,20 @@ impl Server {
 
     fn handle_rq(&self, mut rq: Request) -> Result::<()> {
         match (rq.method(), rq.url()) {
-            (&Method::Get, "/") => serve_bytes(rq, HOME_HTML, "text/html; charset=UTF-8"),
+            (&Method::Get, "/") => {
+                let Some(user_agent) = get_header(&rq, "User-Agent").map(|ua| ua.value.as_str()) else {
+                    return anyerr!("request to `/` with no user-agent")
+                };
+
+                if user_agent_is_mobile(&user_agent) {
+                    serve_bytes(rq, HOME_MOBILE_HTML, "text/html; charset=UTF-8")
+                } else {
+                    serve_bytes(rq, HOME_HTML, "text/html; charset=UTF-8")
+                }
+            }
             (&Method::Get, "/qr.png") => serve_bytes(rq, &self.qr_png_bytes, "image/png; charset=UTF-8"),
             (&Method::Get, "/index.js") => serve_bytes(rq, HOME_SCRIPT, "application/js; charset=UTF-8"),
+            (&Method::Get, "/index-mobile.js") => serve_bytes(rq, HOME_MOBILE_SCRIPT, "application/js; charset=UTF-8"),
             (&Method::Post, "/upload") => {
                 match self.handle_upload(&mut rq) {
                     Ok(fp) => {
