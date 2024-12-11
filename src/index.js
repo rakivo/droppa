@@ -1,3 +1,5 @@
+globalFiles = [];
+
 window.addEventListener("load", () => {
   const qrcodeContainer = document.getElementById("qrcode-container");
 
@@ -67,10 +69,9 @@ document
       return;
     }
     const files = Array.from(ev.dataTransfer.items);
-    const uploadPromises = files.map((file) =>
-      uploadFile(file.getAsFile(), statusDiv)
+    files.forEach((file) =>
+      globalFiles.unshift({ status: "idle", file: file.getAsFile() })
     );
-    await Promise.all(uploadPromises);
   });
 
 document
@@ -88,38 +89,70 @@ document
       return;
     }
 
-    const files = Array.from(fileInput.files);
-    const uploadPromises = files
-      .toReversed()
-      .map((file) => uploadFile(file, statusDiv));
+    const uploadPromises = globalFiles.map((fileObject) => {
+      uploadFile(fileObject);
+    });
     await Promise.all(uploadPromises);
   });
 
-async function uploadFile(file, statusDiv) {
-  const formData = new FormData();
-  formData.append("size", file.size);
-  formData.append("file", file);
+document.getElementById("file-input").addEventListener("change", (e) => {
+  console.log(e);
+  Array.from(e.target.files).forEach((e) => {
+    const { message, fileNameSpan, messageStatusDiv } = createMessage(e);
 
-  console.log(`file size: ${file.size}`);
+    const fullFileObject = {
+      status: "idle",
+      file: e,
+      message: message,
+      fileNameSpan: fileNameSpan,
+      messageStatusDiv: messageStatusDiv,
+    };
 
+    globalFiles.unshift(fullFileObject);
+  });
+  console.log(e);
+});
+
+function createMessage(file) {
+  const statusDiv = document.getElementById("status");
   const message = document.createElement("div");
+  const fileNameSpan = document.createElement("span");
+  const status = document.createElement("span");
+
   message.classList.add("idle");
   message.classList.add("status-message");
-  const fileNameSpan = document.createElement("span");
   fileNameSpan.classList.add("file_name");
-  const status = document.createElement("span");
+  fileNameSpan.title = file.name;
   status.classList.add("status_message");
+
   fileNameSpan.textContent = file.name;
   message.appendChild(fileNameSpan);
+
   message.appendChild(status);
   statusDiv.appendChild(message);
 
+  return {
+    message: message,
+    fileNameSpan: fileNameSpan,
+    messageStatusDiv: status,
+  };
+}
+
+async function uploadFile(fileObject) {
+  if (fileObject.status == "success" || fileObject.status == "progress") {
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("size", fileObject.file.size);
+  formData.append("file", fileObject.file);
+
   try {
     console.log(`Opening progress connection for `);
-    const eventSource = await openProgressConnection(file);
+    const eventSource = await openProgressConnection(fileObject.file);
 
     console.log("Connection opened");
-    trackProgress(eventSource, file, message, status);
+    trackProgress(eventSource, fileObject);
 
     console.log("Sending upload request..");
     const response = await fetch("/upload", {
@@ -130,16 +163,17 @@ async function uploadFile(file, statusDiv) {
     if (!response.ok) {
       const errorText = await response.text();
       console.log(errorText);
-      status.textContent = `FAILURE`;
-      message.className = "status-message error";
+      fileObject.messageStatusDiv.textContent = `FAILURE`;
+      fileObject.message.className = "status-message error";
       return;
     }
 
-    status.textContent = `SUCCESS`;
-    message.className = "status-message success";
+    fileObject.status = "success";
+    fileObject.messageStatusDiv.textContent = `SUCCESS`;
+    fileObject.message.className = "status-message success";
   } catch (error) {
-    message.textContent = `FAILURE`;
-    message.className = "status-message error";
+    fileObject.message.textContent = `FAILURE`;
+    fileObject.message.className = "status-message error";
   }
 }
 
@@ -163,20 +197,23 @@ async function openProgressConnection(file) {
   });
 }
 
-async function trackProgress(eventSource, file, message, status) {
+async function trackProgress(eventSource, fileObject) {
   let isComplete = false;
 
   eventSource.onmessage = (event) => {
     const progressData = JSON.parse(event.data);
     if (progressData.progress !== undefined) {
       const progress = progressData.progress;
-      message.className = "status-message progress";
+      fileObject.message.className = "status-message progress";
 
-      status.textContent = ` ${progress}%`;
+      fileObject.messageStatusDiv.textContent = ` ${progress}%`;
+
+      fileObject.status = "progress";
 
       if (progress === 100) {
-        status.textContent = `SUCCESS`;
-        message.className = "status-message success";
+        fileObject.status = "success";
+        fileObject.messageStatusDiv.textContent = `SUCCESS`;
+        fileObject.message.className = "status-message success";
         isComplete = true;
         eventSource.close();
       }
@@ -184,10 +221,9 @@ async function trackProgress(eventSource, file, message, status) {
   };
 
   eventSource.onerror = (error) => {
-    console.error(`Error on progress connection for ${file.name}`, error);
     if (!isComplete) {
-      message.textContent = `${file.name}: Error establishing progress connection.`;
-      message.classList.add("error");
+      fileObject.message.textContent = `FAILURE`;
+      fileObject.message.classList.add("error");
       eventSource.close();
     }
   };
