@@ -66,6 +66,24 @@
         color: #000;
         border-radius: 6px;
         background-color: #12a746;
+        text-overflow: ellipsis;
+        overflow: hidden;
+        white-space: nowrap;
+      }
+      .idle {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: "Source Code Pro", monospace;
+        font-size: 25px;
+        background-color: #d9d9d9;
+        color: #000;
+        width: 400px;
+        border-radius: 6px;
+        height: 40px;
+        text-overflow: ellipsis;
+        overflow: hidden;
+        white-space: nowrap;
       }
       .error {
         display: flex;
@@ -78,8 +96,16 @@
         width: 400px;
         border-radius: 6px;
         height: 40px;
+        text-overflow: ellipsis;
+        overflow: hidden;
+        white-space: nowrap;
       }
       .progress {
+        text-overflow: ellipsis;
+        overflow: hidden;
+        width: 160px;
+        height: 1.2em;
+        white-space: nowrap;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -89,6 +115,9 @@
         width: 400px;
         height: 40px;
         color: #000;
+        text-overflow: ellipsis;
+        overflow: hidden;
+        white-space: nowrap;
       }
       #toggle_mode-container {
         margin: 0;
