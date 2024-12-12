@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use anyhow::Result;
 use multipart::server::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
+use zip::{ZipWriter, write::SimpleFileOptions};
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use tiny_http::{ReadWrite, Header, Method, Request, Response, StatusCode, Server as TinyHttpServer};
 
@@ -18,14 +19,16 @@ mod stb_image_write;
 
 const SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
 
-const HOME_HTML:          &[u8] = include_bytes!("index.html");
-const HOME_SCRIPT:        &[u8] = include_bytes!("index.js");
+const HOME_HTML:          &[u8] = include_bytes!("index-desktop.html");
+const HOME_SCRIPT:        &[u8] = include_bytes!("index-desktop.js");
 const HOME_MOBILE_HTML:   &[u8] = include_bytes!("index-mobile.html");
 const HOME_MOBILE_SCRIPT: &[u8] = include_bytes!("index-mobile.js");
+
 const NOT_FOUND_HTML:     &[u8] = b"<h1>NOT FOUND</h1>";
 const HTTP_OK_RESPONSE:   &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
 
-type Clients = HashMap::<String, Box::<dyn ReadWrite + Send>>;
+type Stream = dyn ReadWrite + Send;
+type Clients = HashMap::<String, Box::<Stream>>;
 
 type AtomicClients = Arc::<Mutex::<Clients>>;
 
@@ -158,11 +161,19 @@ fn user_agent_is_mobile(user_agent: &str) -> bool {
     ].iter().any(|keyword| user_agent.contains(keyword))
 }
 
+mod droppa {
+    pub struct File {
+        pub bytes: Vec::<u8>,
+        pub file_name: String
+    }
+}
+
 struct Server {
     qr_png_bytes: Vec::<u8>,
     server: TinyHttpServer,
     clients: AtomicClients,
-    sse_response: Response::<std::io::Empty>
+    sse_response: Response::<std::io::Empty>,
+    uploaded_files: Arc::<Mutex::<Vec::<droppa::File>>>
 }
 
 impl Server {
@@ -171,6 +182,7 @@ impl Server {
             qr_png_bytes,
             server: TinyHttpServer::http(ADDR_PORT).unwrap(),
             clients: Arc::new(Mutex::new(Clients::new())),
+            uploaded_files: Arc::new(Mutex::new(Vec::new())),
             sse_response: Response::empty(200)
                 .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
                 .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
@@ -184,7 +196,7 @@ impl Server {
         self.clients.lock().unwrap()
     }
 
-    fn handle_upload(&self, rq: &mut Request) -> Result::<FilePath> {
+    fn handle_mobile_upload(&self, rq: &mut Request) -> Result::<FilePath> {
         let Some(content_type) = get_header(&*rq, "Content-Type") else {
             return anyerr!("request to `/upload` with no user-agent")
         };
@@ -247,6 +259,76 @@ impl Server {
         Ok(file_path)
     }
 
+    fn handle_desktop_upload(&self, rq: &mut Request) -> Result::<droppa::File> {
+        let Some(content_type) = get_header(&*rq, "Content-Type") else {
+            return anyerr!("request to `/upload` with no user-agent")
+        };
+
+        let content_type_value = content_type.value.as_str();
+        if !content_type_value.starts_with("multipart/form-data; boundary=") {
+            return anyerr!("invalid Content-Type")
+        }
+
+        let boundary = content_type_value["multipart/form-data; boundary=".len()..].to_owned();
+        let mut multipart = Multipart::with_body(rq.as_reader(), boundary);
+
+        let Ok(file_size) = multipart.read_entry() else { return anyerr!("Invalid Multipart data") };
+        let Some(Some(file_size)) = file_size.map(|mut field| {
+            if field.headers.name == "size".into() {
+                let mut buf = String::with_capacity(20);
+                field.data.read_to_string(&mut buf).unwrap();
+                Some(buf.trim().parse().unwrap())
+            } else {
+                None
+            }
+        }) else {
+            return anyerr!("invalid Multipart data")
+        };
+
+        let Ok(Some(mut field)) = multipart.read_entry() else {
+            return anyerr!("invalid Multipart data")
+        };
+
+        let Some(file_path_string) = field.headers.filename else {
+            return anyerr!("invalid Multipart data")
+        };
+
+        #[cfg(debug_assertions)]
+        let file_path_string = file_path_string + ".test";
+
+        let file_path = FilePath::new(file_path_string.to_owned());
+
+        println!("[{file_path}] allocating buffer data..");
+        let mut bytes = Vec::with_capacity(file_size);
+        let wbuf = BufWriter::new(&mut bytes);
+        let writer = ProgressTracker::new(wbuf, file_size as _, &file_path_string, Arc::clone(&self.clients));
+
+        println!("[{file_path}] copying data..");
+        field.data.save().size_limit(SIZE_LIMIT).write_to(writer);
+        println!("[{file_path}] done!");
+
+        // {
+        //     let mut clients = self.clients();
+        //     if let Some(writer) = clients.get_mut(&file_path.0) {
+        //         #[allow(unused)]
+        //         if let Err(e) = writer.write_all(const { progress_fmt!("100").as_bytes() }) {
+        //             #[cfg(debug_assertions)]
+        //             eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{file_path}, or error occured: {e}")
+        //         }
+        //         _ = writer.flush()
+        //     }
+        // }
+
+        // Ok(file_path)
+
+        let file = droppa::File {
+            bytes,
+            file_name: file_path_string
+        };
+
+        Ok(file)
+    }
+
     fn handle_rq(&self, mut rq: Request) -> Result::<()> {
         match (rq.method(), rq.url()) {
             (&Method::Get, "/") => {
@@ -263,14 +345,40 @@ impl Server {
             (&Method::Get, "/qr.png") => serve_bytes(rq, &self.qr_png_bytes, "image/png; charset=UTF-8"),
             (&Method::Get, "/index.js") => serve_bytes(rq, HOME_SCRIPT, "application/js; charset=UTF-8"),
             (&Method::Get, "/index-mobile.js") => serve_bytes(rq, HOME_MOBILE_SCRIPT, "application/js; charset=UTF-8"),
-            (&Method::Post, "/upload") => {
-                match self.handle_upload(&mut rq) {
+            (&Method::Post, "/upload-mobile") => {
+                match self.handle_mobile_upload(&mut rq) {
                     Ok(fp) => {
                         _ = self.clients().remove_entry(&fp.0);
                         rq.respond(Response::empty(200))
                     }
                     Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
                 }.map_err(Into::into)
+            },
+            (&Method::Post, "/upload-desktop") => {
+                match self.handle_desktop_upload(&mut rq) {
+                    Ok(file) => {
+                        self.uploaded_files.lock().unwrap().push(file);
+                        rq.respond(Response::empty(200))
+                    }
+                    Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
+                }.map_err(Into::into)
+            },
+            (&Method::Get, "/download-files") => {
+                println!("preparing zip file..");
+
+                let mut output = std::io::Cursor::new(Vec::new());
+                let mut zip = ZipWriter::new(&mut output);
+                let opts = SimpleFileOptions::default();
+                let files = self.uploaded_files.lock().unwrap();
+                for droppa::File { bytes, file_name } in files.iter() {
+                    zip.start_file(file_name, opts)?;
+                    zip.write_all(&bytes)?;
+                }
+
+                zip.finish()?;
+
+                println!("finished zip file, sending it..");
+                rq.respond(Response::from_data(output.into_inner())).map_err(Into::into)
             },
             (&Method::Get, path) => if path.starts_with("/progress") {
                 let file_path = path[const { "/progress".len() + 1 }..].to_owned();

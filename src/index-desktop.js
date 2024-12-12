@@ -166,7 +166,7 @@ async function uploadFile(fileObject) {
     trackProgress(eventSource, fileObject);
 
     console.log("Sending upload request..");
-    const response = await fetch("/upload", {
+    const response = await fetch("/upload-desktop", {
       method: "POST",
       body: formData,
     });

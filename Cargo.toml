@@ -9,3 +9,4 @@ anyhow = "1.0.94"
 qrcodegen = "1.8.0"
 tiny_http = "0.12.0"
 multipart = { git = "https://github.com/rakivo/multipart" }
+zip = { version = "2.2.1", default-features = false, features = ["deflate"] }
