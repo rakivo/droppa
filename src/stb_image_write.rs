@@ -3450,10 +3450,10 @@ pub unsafe fn stbiw__zlib_flushf(
         });
 
         let value = (((*bitbuffer) & ((0xff) as u32)) as u8);
-        let index = (postInc(
+        let idx = (postInc(
             &mut *(((data) as *mut i32).offset(-((2) as isize))).offset((1) as isize),
         )) as isize;
-        *(data).offset(index) = value;
+        *(data).offset(idx) = value;
 
         *bitbuffer >>= 8;
         *bitcount -= ((8) as i32);
