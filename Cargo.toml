@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 rayon = "1.10.0"
+socket2 = "0.5.8"
 anyhow = "1.0.94"
 qrcodegen = "1.8.0"
 tiny_http = "0.12.0"
