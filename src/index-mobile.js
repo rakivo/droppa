@@ -87,7 +87,7 @@ async function uploadFile(file, statusDiv) {
     trackProgress(eventSource, file, message);
 
     console.log("Sending upload request..");
-    const response = await fetch("/upload", {
+    const response = await fetch("/upload-mobile", {
       method: "POST",
       body: formData,
     });
@@ -107,6 +107,28 @@ async function uploadFile(file, statusDiv) {
     message.classList.add("error");
   }
 }
+
+document
+  .getElementById("download-button")
+    .addEventListener("click", async (e) => {
+      fetch('/download-files')
+        .then(response => {
+          if (!response.ok) {
+            throw new Error('Failed to download ZIP file');
+          }
+          return response.blob();  // Convert response to a Blob
+        })
+        .then(blob => {
+          // Create a link element to download the file
+          const link = document.createElement('a');
+          link.href = URL.createObjectURL(blob);  // Create a download URL for the blob
+          link.download = 'example.zip';  // Set the default filename
+          link.click();  // Simulate a click to trigger the download
+        })
+        .catch(error => {
+          console.error('Error downloading file:', error);
+        });
+    });
 
 async function openProgressConnection(file) {
   return new Promise((resolve, reject) => {
