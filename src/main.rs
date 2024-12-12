@@ -1,16 +1,16 @@
-use std::net::UdpSocket;
 use std::sync::{Arc, Mutex};
 use std::io::{Cursor, Write};
 use std::collections::HashMap;
+use std::net::{IpAddr, UdpSocket};
 
 use actix_web::{get, post};
 use actix_web::HttpRequest;
-use actix_multipart::Multipart;
 use futures_util::StreamExt;
+use actix_multipart::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
 use futures_channel::mpsc::{channel, Sender};
 use zip::{ZipWriter, write::SimpleFileOptions};
-use actix_web::{App, HttpServer, HttpResponse, Responder, web::{self, Data}, middleware::Logger};
+use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Data, Bytes}};
 
 #[allow(unused_imports, unused_parens, non_camel_case_types, unused_mut, dead_code, unused_assignments, unused_variables, static_mut_refs, non_snake_case, non_upper_case_globals)]
 mod stb_image_write;
@@ -48,18 +48,6 @@ define_addr_port! {
     const PORT: u16 = 6969;
 }
 
-pub struct File {
-    pub bytes: Vec::<u8>,
-    pub file_name: String
-}
-
-#[derive(Clone)]
-struct AppState {
-    qr_bytes: web::Bytes,
-    clients: AtomicClients,
-    uploaded_files: AtomicFiles,
-}
-
 const SIZE_LIMIT: usize = 1024 * 1024 * 1024;
 
 const HOME_DESKTOP_HTML:   &[u8] = include_bytes!("index-desktop.html");
@@ -68,6 +56,18 @@ const HOME_MOBILE_HTML:    &[u8] = include_bytes!("index-mobile.html");
 const HOME_MOBILE_SCRIPT:  &[u8] = include_bytes!("index-mobile.js");
 
 const HTTP_OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+
+pub struct File {
+    pub bytes: Vec::<u8>,
+    pub file_name: String
+}
+
+#[derive(Clone)]
+struct AppState {
+    qr_bytes: Bytes,
+    clients: AtomicClients,
+    uploaded_files: AtomicFiles
+}
 
 #[inline]
 fn user_agent_is_mobile(user_agent: &str) -> bool {
@@ -84,13 +84,11 @@ fn user_agent_is_mobile(user_agent: &str) -> bool {
 }
 
 #[get("/progress/{file_name}")]
-async fn track_progress(path: web::Path::<String>, state: web::Data<AppState>) -> impl Responder {
-    let file_name = path.into_inner();
-    
+async fn track_progress(path: web::Path::<String>, state: Data::<AppState>) -> impl Responder {
     let (mut tx, rx) = channel::<String>(32);
-
     tx.try_send(HTTP_OK_RESPONSE.to_owned()).unwrap();
     
+    let file_name = path.into_inner();
     println!("[INFO] client connected to <http://localhost:8080/progress/{file_name}>");
     
     let mut clients = state.clients.lock().unwrap();
@@ -136,14 +134,14 @@ async fn index_desktop_js() -> impl Responder {
 }
 
 #[get("/qr.png")]
-async fn qr_code(state: web::Data<AppState>) -> impl Responder {
+async fn qr_code(state: Data::<AppState>) -> impl Responder {
     HttpResponse::Ok()
         .content_type("image/png")
         .body(state.qr_bytes.clone())
 }
 
 #[post("/upload-desktop")]
-async fn upload_desktop(mut payload: Multipart, state: web::Data<AppState>) -> impl Responder {
+async fn upload_desktop(mut payload: Multipart, state: Data::<AppState>) -> impl Responder {
     println!("upload-desktop requested, getting file size..");
 
     let mut file_size = None;
@@ -205,11 +203,11 @@ async fn upload_desktop(mut payload: Multipart, state: web::Data<AppState>) -> i
     println!("uploaded: {file_name}");
 
     state.uploaded_files.lock().unwrap().push(file);
-    HttpResponse::Ok().body(format!("Uploaded: {file_name}"))
+    HttpResponse::Ok().body(format!("uploaded: {file_name}"))
 }
 
 #[get("/download-files")]
-async fn download_files(state: web::Data<AppState>) -> impl Responder {
+async fn download_files(state: web::Data::<AppState>) -> impl Responder {
     #[cfg(debug_assertions)]
     println!("download files requested, zipping them up..");
 
@@ -234,7 +232,7 @@ async fn download_files(state: web::Data<AppState>) -> impl Responder {
         .body(zip_bytes.into_inner())
 }
 
-fn get_default_local_ip_addr() -> Option::<std::net::IpAddr> {
+fn get_default_local_ip_addr() -> Option::<IpAddr> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.connect("1.1.1.1:80").ok()?;
     sock.local_addr().ok().map(|addr| addr.ip())
