@@ -6,9 +6,9 @@ use std::io::{Cursor, Write, BufWriter};
 
 use actix_web::{get, post};
 use actix_web::HttpRequest;
-use futures_util::StreamExt;
 use actix_multipart::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
+use futures_util::{StreamExt, TryStreamExt};
 use futures_channel::mpsc::{channel, Sender};
 use zip::{ZipWriter, write::SimpleFileOptions};
 use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Data, Bytes}};
@@ -64,25 +64,27 @@ pub struct File {
 }
 
 impl File {
-    async fn from_payload(mut payload: Multipart, clients: AtomicClients) -> Result::<File, &'static str> {
+    async fn from_multipart(mut multipart: Multipart, clients: AtomicClients) -> Result::<File, &'static str> {
         let mut size = None;
         let mut name = String::new();
         let mut bytes = Vec::new();
         let mut clients = clients.lock().unwrap();
 
-        while let Some(Ok(mut field)) = payload.next().await {
+        while let Some(Ok(field)) = multipart.next().await {
             if matches!(field.name(), Some(name) if name == "size") {
                 #[cfg(debug_assertions)]
                 println!("processing `size` field...");
-                let mut buf = String::new();
-                while let Some(Ok(chunk)) = field.next().await {
-                    buf.push_str(std::str::from_utf8(&chunk).unwrap());
-                }
+                let buf = field.try_fold(String::new(), |mut acc, chunk| async move {
+                    acc.push_str(std::str::from_utf8(&chunk).unwrap());
+                    Ok(acc)
+                }).await.map_err(|_| "error reading size field")?;
                 size = buf.parse::<usize>().ok();
                 if size.is_none() {
                     return Err("invalid size field")
                 }
-                bytes.try_reserve_exact(size.unwrap() / 8).unwrap();
+                if let Err(..) = bytes.try_reserve_exact(size.unwrap() / 8) {
+                    return Err("could not reserve memory")
+                }
                 #[cfg(debug_assertions)]
                 println!("file size: {fs}", fs = size.unwrap());
             } else {
@@ -98,18 +100,22 @@ impl File {
                     return Err("invalid size field")
                 };
 
-                let Some(tx) = clients.get_mut(&name) else {
-                    return Err("expected `file_name` to be in clients hashmap")
-                };
-
-                while let Some(Ok(chunk)) = field.next().await {
+                bytes = field.try_fold((bytes, {
+                    if let Some(tx) = clients.get_mut(&name) {
+                        tx
+                    } else {
+                        return Err("expected `file_name` to be in clients hashmap")
+                    }
+                }), |(mut bytes, tx), chunk| async move {
                     bytes.extend_from_slice(&chunk);
                     let prgrs = (bytes.len() * 100 / size).min(100);
-                    if prgrs % 5 != 0 { continue }
-                    if let Err(e) = tx.try_send(progress_fmt!(prgrs)) {
-                        eprintln!("failed to send progress: {e}")
+                    if prgrs % 5 == 0 {
+                        if let Err(e) = tx.try_send(progress_fmt!(prgrs)) {
+                            eprintln!("failed to send progress: {e}");
+                        }
                     }
-                }
+                    Ok((bytes, tx))
+                }).await.map_err(|_| "error reading file field")?.0;
             }
         }
 
@@ -197,9 +203,9 @@ async fn qr_code(state: Data::<AppState>) -> impl Responder {
 
 #[post("/upload-desktop")]
 async fn upload_desktop(payload: Multipart, state: Data::<AppState>) -> impl Responder {
-    println!("upload-desktop requested, parsing multipart..");
+    println!("[INFO] upload-desktop requested, parsing multipart..");
 
-    let File { bytes, name } = match File::from_payload(payload, Arc::clone(&state.clients)).await {
+    let File { bytes, name } = match File::from_multipart(payload, Arc::clone(&state.clients)).await {
         Ok(f) => f,
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
@@ -218,9 +224,9 @@ async fn upload_desktop(payload: Multipart, state: Data::<AppState>) -> impl Res
 
 #[post("/upload-mobile")]
 async fn upload_mobile(payload: Multipart, state: Data::<AppState>) -> impl Responder {
-    println!("upload-desktop requested, parsing multipart..");
+    println!("[INFO] upload-desktop requested, parsing multipart..");
 
-    let File { bytes, name } = match File::from_payload(payload, Arc::clone(&state.clients)).await {
+    let File { bytes, name } = match File::from_multipart(payload, Arc::clone(&state.clients)).await {
         Ok(f) => f,
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
@@ -241,8 +247,7 @@ async fn upload_mobile(payload: Multipart, state: Data::<AppState>) -> impl Resp
 
 #[get("/download-files")]
 async fn download_files(state: web::Data::<AppState>) -> impl Responder {
-    #[cfg(debug_assertions)]
-    println!("download files requested, zipping them up..");
+    println!("[INFO] download files requested, zipping them up..");
 
     let mut zip_bytes = Cursor::new(Vec::new());
     let mut zip = ZipWriter::new(&mut zip_bytes);
