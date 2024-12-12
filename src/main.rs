@@ -218,6 +218,9 @@ impl Server {
             return anyerr!("invalid Multipart data")
         };
 
+        #[cfg(debug_assertions)]
+        let file_path_string = file_path_string + ".test";
+
         let file_path = FilePath::new(file_path_string.to_owned());
 
         println!("[{file_path}] creating file");
@@ -309,6 +312,9 @@ fn get_default_local_ip_addr() -> Option::<IpAddr> {
 }
 
 fn main() -> Result::<()> {
+    #[cfg(debug_assertions)]
+    println!("[running in debug mode]");
+
     println!("looking for default local ip address..");
     let local_ip = get_default_local_ip_addr().unwrap_or_else(|| {
         panic!("could not find it..")
