@@ -1,150 +1,147 @@
-use std::fs::File;
-use std::fmt::Display;
+use std::fs;
 use std::collections::HashMap;
 use std::net::{IpAddr, UdpSocket};
-use std::io::{Read, Write, BufWriter};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::io::{Cursor, Write, BufWriter};
 
-use anyhow::Result;
-use multipart::server::Multipart;
+use actix_web::{get, post};
+use actix_web::HttpRequest;
+use actix_multipart::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
+use futures_util::{StreamExt, TryStreamExt};
+use futures_channel::mpsc::{channel, Sender};
 use zip::{ZipWriter, write::SimpleFileOptions};
-use rayon::iter::{ParallelBridge, ParallelIterator};
-use tiny_http::{ReadWrite, Header, Method, Request, Response, StatusCode, Server as TinyHttpServer};
+use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Data, Bytes}};
 
-mod qr;
-use qr::*;
 #[allow(unused_imports, unused_parens, non_camel_case_types, unused_mut, dead_code, unused_assignments, unused_variables, static_mut_refs, non_snake_case, non_upper_case_globals)]
 mod stb_image_write;
 
-const SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
-
-const HOME_HTML:          &[u8] = include_bytes!("index-desktop.html");
-const HOME_SCRIPT:        &[u8] = include_bytes!("index-desktop.js");
-const HOME_MOBILE_HTML:   &[u8] = include_bytes!("index-mobile.html");
-const HOME_MOBILE_SCRIPT: &[u8] = include_bytes!("index-mobile.js");
-
-const NOT_FOUND_HTML:     &[u8] = b"<h1>NOT FOUND</h1>";
-const HTTP_OK_RESPONSE:   &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-
-type Stream = dyn ReadWrite + Send;
-type Clients = HashMap::<String, Box::<Stream>>;
-
-type AtomicClients = Arc::<Mutex::<Clients>>;
-
-macro_rules! define_addr_port {
-    (const ADDR: &str = $addr: literal; const PORT: &str = $port: literal;) => {
-        #[allow(unused)]
-        const ADDR: &str = $addr;
-        #[allow(unused)]
-        const PORT: &str = $port;
-        #[allow(unused)]
-        const ADDR_PORT: &str = concat!($addr, ':', $port);
-    };
-}
+mod qr;
+use qr::*;
 
 macro_rules! progress_fmt {
-    ($lit: literal) => { concat!("data: {{ \"progress\": ", $lit, "}}\n\n") };
+    ($lit: literal) => { concat!("data: { \"progress\": ", $lit, "}\n\n") };
     ($expr: expr) => { format!("data: {{ \"progress\": {} }}\n\n", $expr) };
 }
 
-macro_rules! anyerr {
-    ($lit: literal) => { Err(anyhow::anyhow!($lit)) };
+macro_rules! lock_fn {
+    ($($field: tt), *) => { $(paste::paste! {
+        #[inline]
+        #[track_caller]
+        fn [<lock_ $field>](&self) -> MutexGuard::<[<$field:camel>]> {
+            self.$field.lock().unwrap()
+        }
+    })*};
 }
 
-define_addr_port!{
+macro_rules! atomic_type {
+    ($(type $name: ident = $ty: ty;)*) => {$(paste::paste! {
+        #[allow(unused)] type $name = $ty;
+        #[allow(unused)] type [<Atomic $name>] = Arc::<Mutex::<$ty>>;
+    })*};
+}
+
+macro_rules! define_addr_port {
+    (const ADDR: $addr_ty: ty = $addr: literal; const PORT: $port_ty: ty = $port: literal;) => {
+        #[allow(unused)] const ADDR: $addr_ty = $addr;
+        #[allow(unused)] const PORT: $port_ty = $port;
+        #[allow(unused)] const ADDR_PORT: &str = concat!($addr, ':', $port);
+    };
+}
+
+atomic_type! {
+    type Files = Vec::<File>;
+    type Clients = HashMap::<String, Sender::<String>>;
+}
+
+define_addr_port! {
     const ADDR: &str = "0.0.0.0";
-    const PORT: &str = "6969";
+    const PORT: u16 = 6969;
 }
 
-struct FilePath(String);
+const SIZE_LIMIT: usize = 1024 * 1024 * 1024;
 
-impl FilePath {
-    const MAX_LEN: usize = 30;
-    const DOTS: &str = "[...]";
+const HOME_DESKTOP_HTML:   &[u8] = include_bytes!("index-desktop.html");
+const HOME_DESKTOP_SCRIPT: &[u8] = include_bytes!("index-desktop.js");
+const HOME_MOBILE_HTML:    &[u8] = include_bytes!("index-mobile.html");
+const HOME_MOBILE_SCRIPT:  &[u8] = include_bytes!("index-mobile.js");
 
-    fn new(full_file_path: String) -> Self {
-        let s = if full_file_path.len() > Self::MAX_LEN {
-            let ext_pos = full_file_path.rfind('.').unwrap_or(full_file_path.len());
-            let (name_part, ext_part) = full_file_path.split_at(ext_pos);
-            let trim_len = Self::MAX_LEN - ext_part.len() - const { Self::DOTS.len() };
-            let trimmed_name = if trim_len > 0 {
-                &name_part[..trim_len]
+const HTTP_OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+
+pub struct File {
+    pub name: String,
+    pub bytes: Vec::<u8>
+}
+
+impl File {
+    async fn from_multipart(mut multipart: Multipart, clients: AtomicClients) -> Result::<File, &'static str> {
+        let mut size = None;
+        let mut name = String::new();
+        let mut bytes = Vec::new();
+        let mut clients = clients.lock().unwrap();
+
+        while let Some(Ok(field)) = multipart.next().await {
+            if matches!(field.name(), Some(name) if name == "size") {
+                #[cfg(debug_assertions)]
+                println!("processing `size` field...");
+                let buf = field.try_fold(String::new(), |mut acc, chunk| async move {
+                    acc.push_str(std::str::from_utf8(&chunk).unwrap());
+                    Ok(acc)
+                }).await.map_err(|_| "error reading size field")?;
+                size = buf.parse::<usize>().ok();
+                if size.is_none() {
+                    return Err("invalid size field")
+                }
+                if let Err(..) = bytes.try_reserve_exact(size.unwrap() / 8) {
+                    return Err("could not reserve memory")
+                }
+                #[cfg(debug_assertions)]
+                println!("file size: {fs}", fs = size.unwrap());
             } else {
-                "" // ext too long
-            };
-            format!("{trimmed_name}{dots}{ext_part}", dots = Self::DOTS)
-        } else {
-            full_file_path
-        };
+                #[cfg(debug_assertions)]
+                println!("processing `file` field...");
+                if let Some(content_disposition) = field.content_disposition() {
+                    if let Some(name_) = content_disposition.get_filename() {
+                        name = name_.to_owned()
+                    }
+                }
 
-        Self(s)
+                let Some(size) = size else {
+                    return Err("invalid size field")
+                };
+
+                bytes = field.try_fold((bytes, {
+                    if let Some(tx) = clients.get_mut(&name) {
+                        tx
+                    } else {
+                        return Err("expected `file_name` to be in clients hashmap")
+                    }
+                }), |(mut bytes, tx), chunk| async move {
+                    bytes.extend_from_slice(&chunk);
+                    let prgrs = (bytes.len() * 100 / size).min(100);
+                    if prgrs % 5 == 0 {
+                        if let Err(e) = tx.try_send(progress_fmt!(prgrs)) {
+                            eprintln!("failed to send progress: {e}");
+                        }
+                    }
+                    Ok((bytes, tx))
+                }).await.map_err(|_| "error reading file field")?.0;
+            }
+        }
+
+        Ok(File {bytes, name})
     }
 }
 
-impl Display for FilePath {
-    #[inline(always)]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{fp}", fp = self.0)
-    }
-}
-
-struct ProgressTracker<'a, W: Write> {
-    writer: W,
-    written: u64,
-    total_size: u64,
-    file_path: &'a String,
+#[derive(Clone)]
+struct Server {
+    qr_bytes: Bytes,
+    files: AtomicFiles,
     clients: AtomicClients
 }
 
-impl<'a, W: Write> ProgressTracker::<'a, W> {
-    #[inline]
-    fn new(writer: W, total_size: u64, file_path: &'a String, clients: AtomicClients) -> Self {
-        Self {
-            writer,
-            total_size,
-            written: 0,
-
-            file_path,
-            clients
-        }
-    }
-
-    fn report_progress_if_needed(&mut self) {
-        let p = self.progress();
-        if p % 5 != 0 { return }
-        let mut clients = self.clients.lock().unwrap();
-        let Some(writer) = clients.get_mut(self.file_path) else { return };
-        if let Err(e) = writer.write_all(progress_fmt!(p).as_bytes()) {
-            eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{fp}, or error occured: {e}", fp = self.file_path)
-        }
-    }
-
-    #[inline(always)]
-    fn progress(&self) -> u64 {
-        (self.written * 100 / self.total_size).min(100)
-    }
-}
-
-impl<W: Write> Write for ProgressTracker::<'_, W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result::<usize> {
-        let written = self.writer.write(buf)?;
-        self.written += written as u64;
-        self.report_progress_if_needed();
-        Ok(written)
-    }
-
-    #[inline(always)]
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
-    }
-}
-
-#[inline(always)]
-fn get_header<'a>(rq: &'a Request, field: &str) -> Option::<&'a Header> {
-    rq.headers()
-        .iter()
-        .find(|header| header.field.as_str().as_str().eq_ignore_ascii_case(field))
+impl Server {
+    lock_fn! { files, clients }
 }
 
 #[inline]
@@ -161,279 +158,160 @@ fn user_agent_is_mobile(user_agent: &str) -> bool {
     ].iter().any(|keyword| user_agent.contains(keyword))
 }
 
-mod droppa {
-    pub struct File {
-        pub bytes: Vec::<u8>,
-        pub file_name: String
+#[get("/progress/{file_name}")]
+async fn track_progress(path: web::Path::<String>, state: Data::<Server>) -> impl Responder {
+    let (mut tx, rx) = channel::<String>(32);
+    tx.try_send(HTTP_OK_RESPONSE.to_owned()).unwrap();
+    
+    let file_name = path.into_inner();
+    println!("[INFO] client connected to <http://localhost:8080/progress/{file_name}>");
+    
+    let mut clients = state.lock_clients();
+    clients.insert(file_name, tx);
+
+    let stream = rx.map(|data| Ok::<_, actix_web::Error>(data.into()));
+    HttpResponse::Ok()
+        .append_header(("Content-Type", "text/event-stream"))
+        .append_header(("Cache-Control", "no-cache"))
+        .append_header(("Connection", "keep-alive"))
+        .streaming(stream)
+}
+
+#[get("/")]
+async fn index(rq: HttpRequest) -> impl Responder {
+    let Some(user_agent) = rq.headers().get("User-Agent").and_then(|header| header.to_str().ok()) else {
+        return HttpResponse::BadRequest().body("Request to `/` that does not contain user agent")
+    };
+
+    if user_agent_is_mobile(user_agent) {
+        HttpResponse::Ok()
+            .append_header(("Content-Type", "text/html"))
+            .body(HOME_MOBILE_HTML)
+    } else {
+        HttpResponse::Ok()
+            .append_header(("Content-Type", "text/html"))
+            .body(HOME_DESKTOP_HTML)
     }
 }
 
-struct Server {
-    qr_png_bytes: Vec::<u8>,
-    server: TinyHttpServer,
-    clients: AtomicClients,
-    sse_response: Response::<std::io::Empty>,
-    uploaded_files: Arc::<Mutex::<Vec::<droppa::File>>>
+#[get("/index-mobile.js")]
+async fn index_mobile_js() -> impl Responder {
+    HttpResponse::Ok()
+        .append_header(("Content-Type", "application/javascript; charset=UTF-8"))
+        .body(HOME_MOBILE_SCRIPT)
 }
 
-impl Server {
-    fn new(qr_png_bytes: Vec::<u8>) -> Self {
-        Self {
-            qr_png_bytes,
-            server: TinyHttpServer::http(ADDR_PORT).unwrap(),
-            clients: Arc::new(Mutex::new(Clients::new())),
-            uploaded_files: Arc::new(Mutex::new(Vec::new())),
-            sse_response: Response::empty(200)
-                .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
-                .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
-                .with_header(Header::from_bytes("Connection", "keep-alive").unwrap()),
-        }
-    }
+#[get("/index-desktop.js")]
+async fn index_desktop_js() -> impl Responder {
+    HttpResponse::Ok()
+        .append_header(("Content-Type", "application/javascript; charset=UTF-8"))
+        .body(HOME_DESKTOP_SCRIPT)
+}
 
-    #[track_caller]
-    #[inline(always)]
-    fn clients(&self) -> MutexGuard::<Clients> {
-        self.clients.lock().unwrap()
-    }
+#[get("/qr.png")]
+async fn qr_code(state: Data::<Server>) -> impl Responder {
+    HttpResponse::Ok()
+        .content_type("image/png")
+        .body(state.qr_bytes.clone())
+}
 
-    fn handle_mobile_upload(&self, rq: &mut Request) -> Result::<FilePath> {
-        let Some(content_type) = get_header(&*rq, "Content-Type") else {
-            return anyerr!("request to `/upload` with no user-agent")
-        };
+#[post("/upload-desktop")]
+async fn upload_desktop(payload: Multipart, state: Data::<Server>) -> impl Responder {
+    println!("[INFO] upload-desktop requested, parsing multipart..");
 
-        let content_type_value = content_type.value.as_str();
-        if !content_type_value.starts_with("multipart/form-data; boundary=") {
-            return anyerr!("invalid Content-Type")
-        }
+    let File { bytes, name } = match File::from_multipart(payload, Arc::clone(&state.clients)).await {
+        Ok(f) => f,
+        Err(e) => return HttpResponse::BadRequest().body(e)
+    };
 
-        let boundary = content_type_value["multipart/form-data; boundary=".len()..].to_owned();
-        let mut multipart = Multipart::with_body(rq.as_reader(), boundary);
-
-        let Ok(file_size) = multipart.read_entry() else { return anyerr!("Invalid Multipart data") };
-        let Some(Some(file_size)) = file_size.map(|mut field| {
-            if field.headers.name == "size".into() {
-                let mut buf = String::with_capacity(20);
-                field.data.read_to_string(&mut buf).unwrap();
-                Some(buf.trim().parse().unwrap())
-            } else {
-                None
-            }
-        }) else {
-            return anyerr!("invalid Multipart data")
-        };
-
-        let Ok(Some(mut field)) = multipart.read_entry() else {
-            return anyerr!("invalid Multipart data")
-        };
-
-        let Some(file_path_string) = field.headers.filename else {
-            return anyerr!("invalid Multipart data")
-        };
-
+    if bytes.len() > SIZE_LIMIT {
         #[cfg(debug_assertions)]
-        let file_path_string = file_path_string + ".test";
-
-        let file_path = FilePath::new(file_path_string.to_owned());
-
-        println!("[{file_path}] creating file");
-        let file = File::create(&file_path_string)?;
-        let wbuf = BufWriter::new(file);
-        let writer = ProgressTracker::new(wbuf, file_size, &file_path_string, Arc::clone(&self.clients));
-
-        println!("[{file_path}] copying data..");
-        field.data.save().size_limit(SIZE_LIMIT).write_to(writer);
-        println!("[{file_path}] done!");
-
-        {
-            let mut clients = self.clients();
-            if let Some(writer) = clients.get_mut(&file_path.0) {
-                #[allow(unused)]
-                if let Err(e) = writer.write_all(const { progress_fmt!("100").as_bytes() }) {
-                    #[cfg(debug_assertions)]
-                    eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{file_path}, or error occured: {e}")
-                }
-                _ = writer.flush()
-            }
-        }
-
-        Ok(file_path)
+        println!("file size exceeds limit, returning bad request..");
+        return HttpResponse::BadRequest().body("file size exceeds limit")
     }
 
-    fn handle_desktop_upload(&self, rq: &mut Request) -> Result::<droppa::File> {
-        let Some(content_type) = get_header(&*rq, "Content-Type") else {
-            return anyerr!("request to `/upload` with no user-agent")
-        };
+    println!("uploaded: {name}");
 
-        let content_type_value = content_type.value.as_str();
-        if !content_type_value.starts_with("multipart/form-data; boundary=") {
-            return anyerr!("invalid Content-Type")
-        }
-
-        let boundary = content_type_value["multipart/form-data; boundary=".len()..].to_owned();
-        let mut multipart = Multipart::with_body(rq.as_reader(), boundary);
-
-        let Ok(file_size) = multipart.read_entry() else { return anyerr!("Invalid Multipart data") };
-        let Some(Some(file_size)) = file_size.map(|mut field| {
-            if field.headers.name == "size".into() {
-                let mut buf = String::with_capacity(20);
-                field.data.read_to_string(&mut buf).unwrap();
-                Some(buf.trim().parse().unwrap())
-            } else {
-                None
-            }
-        }) else {
-            return anyerr!("invalid Multipart data")
-        };
-
-        let Ok(Some(mut field)) = multipart.read_entry() else {
-            return anyerr!("invalid Multipart data")
-        };
-
-        let Some(file_path_string) = field.headers.filename else {
-            return anyerr!("invalid Multipart data")
-        };
-
-        #[cfg(debug_assertions)]
-        let file_path_string = file_path_string + ".test";
-
-        let file_path = FilePath::new(file_path_string.to_owned());
-
-        println!("[{file_path}] allocating buffer data..");
-        let mut bytes = Vec::with_capacity(file_size);
-        let wbuf = BufWriter::new(&mut bytes);
-        let writer = ProgressTracker::new(wbuf, file_size as _, &file_path_string, Arc::clone(&self.clients));
-
-        println!("[{file_path}] copying data..");
-        field.data.save().size_limit(SIZE_LIMIT).write_to(writer);
-        println!("[{file_path}] done!");
-
-        // {
-        //     let mut clients = self.clients();
-        //     if let Some(writer) = clients.get_mut(&file_path.0) {
-        //         #[allow(unused)]
-        //         if let Err(e) = writer.write_all(const { progress_fmt!("100").as_bytes() }) {
-        //             #[cfg(debug_assertions)]
-        //             eprintln!("error: client disconnected from http://{ADDR_PORT}/progress/{file_path}, or error occured: {e}")
-        //         }
-        //         _ = writer.flush()
-        //     }
-        // }
-
-        // Ok(file_path)
-
-        let file = droppa::File {
-            bytes,
-            file_name: file_path_string
-        };
-
-        Ok(file)
-    }
-
-    fn handle_rq(&self, mut rq: Request) -> Result::<()> {
-        match (rq.method(), rq.url()) {
-            (&Method::Get, "/") => {
-                let Some(user_agent) = get_header(&rq, "User-Agent").map(|ua| ua.value.as_str()) else {
-                    return anyerr!("request to `/` with no user-agent")
-                };
-
-                if user_agent_is_mobile(&user_agent) {
-                    serve_bytes(rq, HOME_MOBILE_HTML, "text/html; charset=UTF-8")
-                } else {
-                    serve_bytes(rq, HOME_HTML, "text/html; charset=UTF-8")
-                }
-            }
-            (&Method::Get, "/qr.png") => serve_bytes(rq, &self.qr_png_bytes, "image/png; charset=UTF-8"),
-            (&Method::Get, "/index.js") => serve_bytes(rq, HOME_SCRIPT, "application/js; charset=UTF-8"),
-            (&Method::Get, "/index-mobile.js") => serve_bytes(rq, HOME_MOBILE_SCRIPT, "application/js; charset=UTF-8"),
-            (&Method::Post, "/upload-mobile") => {
-                match self.handle_mobile_upload(&mut rq) {
-                    Ok(fp) => {
-                        _ = self.clients().remove_entry(&fp.0);
-                        rq.respond(Response::empty(200))
-                    }
-                    Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
-                }.map_err(Into::into)
-            },
-            (&Method::Post, "/upload-desktop") => {
-                match self.handle_desktop_upload(&mut rq) {
-                    Ok(file) => {
-                        self.uploaded_files.lock().unwrap().push(file);
-                        rq.respond(Response::empty(200))
-                    }
-                    Err(e) => rq.respond(Response::from_string(e.to_string()).with_status_code(StatusCode(500))),
-                }.map_err(Into::into)
-            },
-            (&Method::Get, "/download-files") => {
-                println!("preparing zip file..");
-
-                let mut output = std::io::Cursor::new(Vec::new());
-                let mut zip = ZipWriter::new(&mut output);
-                let opts = SimpleFileOptions::default();
-                let files = self.uploaded_files.lock().unwrap();
-                for droppa::File { bytes, file_name } in files.iter() {
-                    zip.start_file(file_name, opts)?;
-                    zip.write_all(&bytes)?;
-                }
-
-                zip.finish()?;
-
-                println!("finished zip file, sending it..");
-                rq.respond(Response::from_data(output.into_inner())).map_err(Into::into)
-            },
-            (&Method::Get, path) => if path.starts_with("/progress") {
-                let file_path = path[const { "/progress".len() + 1 }..].to_owned();
-                let mut stream = rq.upgrade("SSE", self.sse_response.clone());
-                stream.write_all(HTTP_OK_RESPONSE)?;
-                stream.flush()?;
-                println!("[INFO] client connected to <http://{ADDR_PORT}/progress/{file_path}>");
-                self.clients().insert(file_path, stream);
-                Ok(())
-            } else {
-                serve_bytes(rq, NOT_FOUND_HTML, "text/html; charset=UTF-8")
-            }
-            _ => Ok(())
-        }
-    }
-
-    fn serve(&mut self) {
-        println!("serving at: <http://{ADDR_PORT}>");
-        self.server.incoming_requests().par_bridge().for_each(|rq| {
-            _ = self.handle_rq(rq).inspect_err(|e| eprintln!("{e}"))
-        });
-    }
+    state.lock_files().push(File { bytes, name });
+    HttpResponse::Ok().finish()
 }
 
-#[inline]
-fn serve_bytes(request: Request, bytes: &[u8], content_type: &str) -> Result::<()> {
-    let content_type_header = Header::from_bytes("Content-Type", content_type).expect("invalid header string");
-    request.respond(Response::from_data(bytes).with_header(content_type_header))?;
-    Ok(())
+#[post("/upload-mobile")]
+async fn upload_mobile(payload: Multipart, state: Data::<Server>) -> impl Responder {
+    println!("[INFO] upload-desktop requested, parsing multipart..");
+
+    let File { bytes, name } = match File::from_multipart(payload, Arc::clone(&state.clients)).await {
+        Ok(f) => f,
+        Err(e) => return HttpResponse::BadRequest().body(e)
+    };
+
+    let file = match fs::File::create(&name) {
+        Ok(f) => f,
+        Err(e) => return HttpResponse::BadRequest().body(format!("could not create file: {name}: {e}"))
+    };
+
+    println!("copying bytes to: {name}..");
+    let mut wbuf = BufWriter::new(file);
+    _ = wbuf.write_all(&bytes).map_err(|e| {
+        return HttpResponse::BadRequest().body(format!("could not copy bytes to: {name}: {e}"))
+    });
+
+    HttpResponse::Ok().finish()
+}
+
+#[get("/download-files")]
+async fn download_files(state: web::Data::<Server>) -> impl Responder {
+    println!("[INFO] download files requested, zipping them up..");
+
+    let mut zip_bytes = Cursor::new(Vec::new());
+    let mut zip = ZipWriter::new(&mut zip_bytes);
+
+    let opts = SimpleFileOptions::default();
+    for file in state.lock_files().iter() {
+        zip.start_file(&file.name, opts).unwrap();
+        zip.write_all(&file.bytes).unwrap();
+    }
+
+    zip.finish().unwrap();
+
+    #[cfg(debug_assertions)]
+    println!("finished zipping up the files, sending to your phone..");
+
+    HttpResponse::Ok()
+        .content_type("application/zip")
+        .body(zip_bytes.into_inner())
 }
 
 fn get_default_local_ip_addr() -> Option::<IpAddr> {
-    let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else { return None };
-    if sock.connect("1.1.1.1:80").is_err() { return None }
-    match sock.local_addr() {
-        Ok(addr) => Some(addr.ip()),
-        Err(_) => None
-    }
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("1.1.1.1:80").ok()?;
+    sock.local_addr().ok().map(|addr| addr.ip())
 }
 
-fn main() -> Result::<()> {
-    #[cfg(debug_assertions)]
-    println!("[running in debug mode]");
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    println!("looking for default local IP address...");
+    let local_ip = get_default_local_ip_addr().unwrap_or_else(|| panic!("could not find local IP address"));
 
-    println!("looking for default local ip address..");
-    let local_ip = get_default_local_ip_addr().unwrap_or_else(|| {
-        panic!("could not find it..")
-    });
-
-    println!("found: {local_ip}, using it to generate qr-code..");
+    println!("found: {local_ip}, using it to generate QR code...");
     let local_addr = format!("http://{local_ip}:{PORT}");
-    let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode url to qr code");
-    let qr_png_bytes = gen_qr_png_bytes(&qr).expect("could not generate a qr-code image");
+    let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode URL to QR code");
+    println!("serving at: <http://{ADDR_PORT}>");
 
-    Server::new(qr_png_bytes).serve();
-
-    Ok(())
+    HttpServer::new(move || {
+        App::new()
+            .app_data(Data::new(Server {
+                files: Arc::new(Mutex::new(Vec::new())),
+                clients: Arc::new(Mutex::new(HashMap::new())),
+                qr_bytes: gen_qr_png_bytes(&qr).expect("Could not generate QR code image").into(),
+            })).wrap(Logger::default())
+            .service(index)
+            .service(qr_code)
+            .service(track_progress)
+            .service(download_files)
+            .service(upload_mobile)
+            .service(upload_desktop)
+            .service(index_mobile_js)
+            .service(index_desktop_js)
+    }).bind((ADDR, PORT))?.run().await
 }

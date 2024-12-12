@@ -171,6 +171,8 @@ async function uploadFile(fileObject) {
       body: formData,
     });
 
+    console.log(response);
+
     if (!response.ok) {
       const errorText = await response.text();
       console.log(errorText);
@@ -212,6 +214,7 @@ async function trackProgress(eventSource, fileObject) {
   let isComplete = false;
 
   eventSource.onmessage = (event) => {
+    console.log(event.data);
     const progressData = JSON.parse(event.data);
     if (progressData.progress !== undefined) {
       const progress = progressData.progress;
