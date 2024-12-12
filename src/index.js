@@ -70,9 +70,7 @@ document
     }
     const files = Array.from(ev.dataTransfer.items);
     files.forEach((file) => {
-      const { message, fileNameSpan, messageStatusDiv } = createMessage(
-        file.getAsFile()
-      );
+      const { message, fileNameSpan, messageStatusDiv } = createMessage(file);
 
       const fullFileObject = {
         status: "idle",
@@ -92,7 +90,7 @@ document
     const fileInput = document.getElementById("file-input");
     const statusDiv = document.getElementById("status");
 
-    if (!globalFiles.length) {
+    if (!fileInput.files.length) {
       const message = document.createElement("div");
       message.textContent = "Please select files!";
       message.classList.add("status-message", "error");
