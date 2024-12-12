@@ -1,7 +1,7 @@
 use std::fs;
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::net::{IpAddr, UdpSocket};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::io::{Cursor, Write, BufWriter};
 
 use actix_web::{get, post};
@@ -22,6 +22,16 @@ use qr::*;
 macro_rules! progress_fmt {
     ($lit: literal) => { concat!("data: { \"progress\": ", $lit, "}\n\n") };
     ($expr: expr) => { format!("data: {{ \"progress\": {} }}\n\n", $expr) };
+}
+
+macro_rules! lock_fn {
+    ($($field: tt), *) => { $(paste::paste! {
+        #[inline]
+        #[track_caller]
+        fn [<lock_ $field>](&self) -> MutexGuard::<[<$field:camel>]> {
+            self.$field.lock().unwrap()
+        }
+    })*};
 }
 
 macro_rules! atomic_type {
@@ -124,10 +134,14 @@ impl File {
 }
 
 #[derive(Clone)]
-struct AppState {
+struct Server {
     qr_bytes: Bytes,
-    clients: AtomicClients,
-    uploaded_files: AtomicFiles
+    files: AtomicFiles,
+    clients: AtomicClients
+}
+
+impl Server {
+    lock_fn! { files, clients }
 }
 
 #[inline]
@@ -145,14 +159,14 @@ fn user_agent_is_mobile(user_agent: &str) -> bool {
 }
 
 #[get("/progress/{file_name}")]
-async fn track_progress(path: web::Path::<String>, state: Data::<AppState>) -> impl Responder {
+async fn track_progress(path: web::Path::<String>, state: Data::<Server>) -> impl Responder {
     let (mut tx, rx) = channel::<String>(32);
     tx.try_send(HTTP_OK_RESPONSE.to_owned()).unwrap();
     
     let file_name = path.into_inner();
     println!("[INFO] client connected to <http://localhost:8080/progress/{file_name}>");
     
-    let mut clients = state.clients.lock().unwrap();
+    let mut clients = state.lock_clients();
     clients.insert(file_name, tx);
 
     let stream = rx.map(|data| Ok::<_, actix_web::Error>(data.into()));
@@ -195,14 +209,14 @@ async fn index_desktop_js() -> impl Responder {
 }
 
 #[get("/qr.png")]
-async fn qr_code(state: Data::<AppState>) -> impl Responder {
+async fn qr_code(state: Data::<Server>) -> impl Responder {
     HttpResponse::Ok()
         .content_type("image/png")
         .body(state.qr_bytes.clone())
 }
 
 #[post("/upload-desktop")]
-async fn upload_desktop(payload: Multipart, state: Data::<AppState>) -> impl Responder {
+async fn upload_desktop(payload: Multipart, state: Data::<Server>) -> impl Responder {
     println!("[INFO] upload-desktop requested, parsing multipart..");
 
     let File { bytes, name } = match File::from_multipart(payload, Arc::clone(&state.clients)).await {
@@ -218,12 +232,12 @@ async fn upload_desktop(payload: Multipart, state: Data::<AppState>) -> impl Res
 
     println!("uploaded: {name}");
 
-    state.uploaded_files.lock().unwrap().push(File { bytes, name });
+    state.lock_files().push(File { bytes, name });
     HttpResponse::Ok().finish()
 }
 
 #[post("/upload-mobile")]
-async fn upload_mobile(payload: Multipart, state: Data::<AppState>) -> impl Responder {
+async fn upload_mobile(payload: Multipart, state: Data::<Server>) -> impl Responder {
     println!("[INFO] upload-desktop requested, parsing multipart..");
 
     let File { bytes, name } = match File::from_multipart(payload, Arc::clone(&state.clients)).await {
@@ -246,14 +260,14 @@ async fn upload_mobile(payload: Multipart, state: Data::<AppState>) -> impl Resp
 }
 
 #[get("/download-files")]
-async fn download_files(state: web::Data::<AppState>) -> impl Responder {
+async fn download_files(state: web::Data::<Server>) -> impl Responder {
     println!("[INFO] download files requested, zipping them up..");
 
     let mut zip_bytes = Cursor::new(Vec::new());
     let mut zip = ZipWriter::new(&mut zip_bytes);
 
     let opts = SimpleFileOptions::default();
-    let files = state.uploaded_files.lock().unwrap();
+    let files = state.lock_files();
     for file in files.iter() {
         zip.start_file(&file.name, opts).unwrap();
         zip.write_all(&file.bytes).unwrap();
@@ -283,19 +297,15 @@ async fn main() -> std::io::Result<()> {
     println!("found: {local_ip}, using it to generate QR code...");
     let local_addr = format!("http://{local_ip}:{PORT}");
     let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode URL to QR code");
-
-    let state = AppState {
-        clients: Arc::new(Mutex::new(HashMap::new())),
-        uploaded_files: Arc::new(Mutex::new(Vec::new())),
-        qr_bytes: gen_qr_png_bytes(&qr).expect("Could not generate QR code image").into(),
-    };
-
     println!("serving at: <http://{ADDR_PORT}>");
 
     HttpServer::new(move || {
         App::new()
-            .app_data(Data::new(state.clone()))
-            .wrap(Logger::default())
+            .app_data(Data::new(Server {
+                files: Arc::new(Mutex::new(Vec::new())),
+                clients: Arc::new(Mutex::new(HashMap::new())),
+                qr_bytes: gen_qr_png_bytes(&qr).expect("Could not generate QR code image").into(),
+            })).wrap(Logger::default())
             .service(index)
             .service(qr_code)
             .service(track_progress)
