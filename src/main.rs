@@ -1,7 +1,8 @@
+use std::fs;
 use std::sync::{Arc, Mutex};
-use std::io::{Cursor, Write};
 use std::collections::HashMap;
 use std::net::{IpAddr, UdpSocket};
+use std::io::{Cursor, Write, BufWriter};
 
 use actix_web::{get, post};
 use actix_web::HttpRequest;
@@ -58,8 +59,62 @@ const HOME_MOBILE_SCRIPT:  &[u8] = include_bytes!("index-mobile.js");
 const HTTP_OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
 
 pub struct File {
-    pub bytes: Vec::<u8>,
-    pub file_name: String
+    pub name: String,
+    pub bytes: Vec::<u8>
+}
+
+impl File {
+    async fn from_payload(mut payload: Multipart, clients: AtomicClients) -> Result::<File, &'static str> {
+        let mut size = None;
+        let mut name = String::new();
+        let mut bytes = Vec::new();
+        let mut clients = clients.lock().unwrap();
+
+        while let Some(Ok(mut field)) = payload.next().await {
+            if matches!(field.name(), Some(name) if name == "size") {
+                #[cfg(debug_assertions)]
+                println!("processing `size` field...");
+                let mut buf = String::new();
+                while let Some(Ok(chunk)) = field.next().await {
+                    buf.push_str(std::str::from_utf8(&chunk).unwrap());
+                }
+                size = buf.parse::<usize>().ok();
+                if size.is_none() {
+                    return Err("invalid size field")
+                }
+                bytes.try_reserve_exact(size.unwrap() / 8).unwrap();
+                #[cfg(debug_assertions)]
+                println!("file size: {fs}", fs = size.unwrap());
+            } else {
+                #[cfg(debug_assertions)]
+                println!("processing `file` field...");
+                if let Some(content_disposition) = field.content_disposition() {
+                    if let Some(name_) = content_disposition.get_filename() {
+                        name = name_.to_owned()
+                    }
+                }
+
+                let Some(size) = size else {
+                    return Err("invalid size field")
+                };
+
+                let Some(tx) = clients.get_mut(&name) else {
+                    return Err("expected `file_name` to be in clients hashmap")
+                };
+
+                while let Some(Ok(chunk)) = field.next().await {
+                    bytes.extend_from_slice(&chunk);
+                    let prgrs = (bytes.len() * 100 / size).min(100);
+                    if prgrs % 5 != 0 { continue }
+                    if let Err(e) = tx.try_send(progress_fmt!(prgrs)) {
+                        eprintln!("failed to send progress: {e}")
+                    }
+                }
+            }
+        }
+
+        Ok(File {bytes, name})
+    }
 }
 
 #[derive(Clone)]
@@ -141,69 +196,47 @@ async fn qr_code(state: Data::<AppState>) -> impl Responder {
 }
 
 #[post("/upload-desktop")]
-async fn upload_desktop(mut payload: Multipart, state: Data::<AppState>) -> impl Responder {
-    println!("upload-desktop requested, getting file size..");
+async fn upload_desktop(payload: Multipart, state: Data::<AppState>) -> impl Responder {
+    println!("upload-desktop requested, parsing multipart..");
 
-    let mut file_size = None;
-    let mut file_name = String::new();
-    let mut file_bytes = Vec::new();
-    let mut clients = state.clients.lock().unwrap();
+    let File { bytes, name } = match File::from_payload(payload, Arc::clone(&state.clients)).await {
+        Ok(f) => f,
+        Err(e) => return HttpResponse::BadRequest().body(e)
+    };
 
-    while let Some(Ok(mut field)) = payload.next().await {
-        if matches!(field.name(), Some(name) if name == "size") {
-            #[cfg(debug_assertions)]
-            println!("processing `size` field...");
-            let mut buf = String::new();
-            while let Some(Ok(chunk)) = field.next().await {
-                buf.push_str(std::str::from_utf8(&chunk).unwrap());
-            }
-            file_size = buf.parse::<usize>().ok();
-            if file_size.is_none() {
-                return HttpResponse::BadRequest().body("invalid size field")
-            }
-            file_bytes.try_reserve_exact(file_size.unwrap() / 8).unwrap();
-            #[cfg(debug_assertions)]
-            println!("file size: {fs}", fs = file_size.unwrap());
-        } else {
-            #[cfg(debug_assertions)]
-            println!("processing `file` field...");
-            if let Some(content_disposition) = field.content_disposition() {
-                if let Some(name) = content_disposition.get_filename() {
-                    file_name = name.to_owned();
-                }
-            }
-
-            let Some(size) = file_size else {
-                return HttpResponse::BadRequest().body("invalid size field")
-            };
-
-            while let Some(Ok(chunk)) = field.next().await {
-                file_bytes.extend_from_slice(&chunk);
-                let prgrs = (file_bytes.len() * 100 / size).min(100);
-                if prgrs % 5 != 0 { continue }
-                let Some(tx) = clients.get_mut(&file_name) else { continue };
-                if let Err(e) = tx.try_send(progress_fmt!(prgrs)) {
-                    eprintln!("failed to send progress: {e}")
-                }
-            }
-        }
-    }
-
-    if file_bytes.len() > SIZE_LIMIT {
+    if bytes.len() > SIZE_LIMIT {
         #[cfg(debug_assertions)]
         println!("file size exceeds limit, returning bad request..");
         return HttpResponse::BadRequest().body("file size exceeds limit")
     }
 
-    let file = File {
-        bytes: file_bytes,
-        file_name: file_name.clone(),
+    println!("uploaded: {name}");
+
+    state.uploaded_files.lock().unwrap().push(File { bytes, name });
+    HttpResponse::Ok().finish()
+}
+
+#[post("/upload-mobile")]
+async fn upload_mobile(payload: Multipart, state: Data::<AppState>) -> impl Responder {
+    println!("upload-desktop requested, parsing multipart..");
+
+    let File { bytes, name } = match File::from_payload(payload, Arc::clone(&state.clients)).await {
+        Ok(f) => f,
+        Err(e) => return HttpResponse::BadRequest().body(e)
     };
 
-    println!("uploaded: {file_name}");
+    let file = match fs::File::create(&name) {
+        Ok(f) => f,
+        Err(e) => return HttpResponse::BadRequest().body(format!("could not create file: {name}: {e}"))
+    };
 
-    state.uploaded_files.lock().unwrap().push(file);
-    HttpResponse::Ok().body(format!("uploaded: {file_name}"))
+    println!("copying bytes to: {name}..");
+    let mut wbuf = BufWriter::new(file);
+    _ = wbuf.write_all(&bytes).map_err(|e| {
+        return HttpResponse::BadRequest().body(format!("could not copy bytes to: {name}: {e}"))
+    });
+
+    HttpResponse::Ok().finish()
 }
 
 #[get("/download-files")]
@@ -211,14 +244,13 @@ async fn download_files(state: web::Data::<AppState>) -> impl Responder {
     #[cfg(debug_assertions)]
     println!("download files requested, zipping them up..");
 
-    let files = state.uploaded_files.lock().unwrap();
-
     let mut zip_bytes = Cursor::new(Vec::new());
     let mut zip = ZipWriter::new(&mut zip_bytes);
-    let opts = SimpleFileOptions::default();
 
+    let opts = SimpleFileOptions::default();
+    let files = state.uploaded_files.lock().unwrap();
     for file in files.iter() {
-        zip.start_file(&file.file_name, opts).unwrap();
+        zip.start_file(&file.name, opts).unwrap();
         zip.write_all(&file.bytes).unwrap();
     }
 
@@ -263,6 +295,7 @@ async fn main() -> std::io::Result<()> {
             .service(qr_code)
             .service(track_progress)
             .service(download_files)
+            .service(upload_mobile)
             .service(upload_desktop)
             .service(index_mobile_js)
             .service(index_desktop_js)
