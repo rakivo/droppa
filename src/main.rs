@@ -1,14 +1,17 @@
 use std::fs::File;
 use std::fmt::Display;
-use std::net::Ipv4Addr;
+use std::time::Instant;
+use std::mem::MaybeUninit;
 use std::collections::HashMap;
 use std::io::{Read, Write, BufWriter};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use anyhow::Result;
 use multipart::server::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
 use get_if_addrs::{IfAddr, get_if_addrs};
+use socket2::{Domain, Protocol, Socket, Type};
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use tiny_http::{ReadWrite, Header, Method, Request, Response, StatusCode, Server as TinyHttpServer};
 
@@ -17,7 +20,11 @@ use qr::*;
 #[allow(unused_imports, unused_parens, non_camel_case_types, unused_mut, dead_code, unused_assignments, unused_variables, static_mut_refs, non_snake_case, non_upper_case_globals)]
 mod stb_image_write;
 
+const ICMP_ECHO_REPLY: u8 = 0;
+const ICMP_ECHO_REQUEST: u8 = 8;
+const TIMEOUT_DURATION: u64 = 3;
 const SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
+const GOOGLE_IPV4: Ipv4Addr = Ipv4Addr::from_bits(0x08080808);
 
 const HOME_HTML:          &[u8] = include_bytes!("index.html");
 const HOME_SCRIPT:        &[u8] = include_bytes!("index.js");
@@ -300,21 +307,91 @@ fn serve_bytes(request: Request, bytes: &[u8], content_type: &str) -> Result::<(
     Ok(())
 }
 
-fn find_loopback_addr() -> Option::<Ipv4Addr> {
-    get_if_addrs().ok()?.into_iter().find(|iface| {
-        !iface.is_loopback()
-    }).map(|iface| {
-        if let IfAddr::V4(addr) = iface.addr {
-            Some(addr.ip)
-        } else {
-            None
+fn ping_interface(interface_name: &String, src_ip: Ipv4Addr, dest_ip: Ipv4Addr) -> std::io::Result<bool> {
+    fn compute_checksum(data: &[u8]) -> u16 {
+        let mut sum = 0u32;
+        let chunks = data.chunks_exact(2);
+        if let Some(&last_byte) = chunks.remainder().first() {
+            sum += (last_byte as u32) << 8;
         }
-    })?
+
+        sum += chunks.into_iter()
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]) as u32)
+            .sum::<u32>();
+
+        while (sum >> 16) > 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+
+        !(sum as u16)
+    }
+
+    println!("pinging from interface {interface_name} (IP: {src_ip}) to {dest_ip}");
+
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4))?;
+    let source_addr = SocketAddr::V4(SocketAddrV4::new(src_ip, 0));
+    socket.bind(&source_addr.into())?;
+
+    let mut packet = [0u8; 64];
+    packet[0] = ICMP_ECHO_REQUEST;
+    packet[1] = 0;
+    packet[2..4].copy_from_slice(&[0, 0]);
+
+    let identifier = 0x1234u16;
+    let sequence = 0x1u16;
+    packet[4..6].copy_from_slice(&identifier.to_be_bytes());
+    packet[6..8].copy_from_slice(&sequence.to_be_bytes());
+
+    let checksum = compute_checksum(&packet);
+    packet[2..4].copy_from_slice(&checksum.to_be_bytes());
+
+    let dst = SocketAddr::V4(SocketAddrV4::new(dest_ip, 0)).into();
+    socket.send_to(&packet, &dst)?;
+
+    let start_time = Instant::now();
+
+    let mut buffer: [MaybeUninit::<u8>; 1024] = unsafe { MaybeUninit::uninit().assume_init() };
+    loop {
+        if start_time.elapsed().as_secs() >= TIMEOUT_DURATION {
+            #[cfg(debug_assertions)]
+            println!("timeout: no reply within 1 second.");
+            return Ok(false)
+        }
+
+        let sender = socket.recv_from(&mut buffer)?.1;
+        let buffer = unsafe { &*(buffer.as_mut_ptr() as *mut [u8; 1024]) };
+
+        let sockv4 = sender.as_socket_ipv4().unwrap();
+        let sender_ip = sockv4.ip();
+
+        if sender_ip != &dest_ip { continue }
+
+        let reply_type = buffer[20];
+        if reply_type != ICMP_ECHO_REPLY { continue }
+
+        println!("received ICMP echo reply from {sender_ip} in {:.3} ms", start_time.elapsed().as_millis());
+        println!("found fitting interface, generating qr-code..");
+
+        return Ok(true)
+    }
+}
+
+fn find_loopback_addr() -> Option::<Ipv4Addr> {
+    get_if_addrs().ok()?.into_iter().find_map(|iface| {
+        if iface.is_loopback() { return None }
+        match &iface.addr {
+            IfAddr::V4(v4) if ping_interface(&iface.name, v4.ip, GOOGLE_IPV4).is_ok_and(|b| b) => {
+                Some(v4.ip)
+            }
+            _ => None // TODO: check ipv6 interfaces
+        }
+    })
 }
 
 fn main() -> Result::<()> {
+    println!("looking for non-loopback ipv4 interface with an internet access..");
     let local_ip = find_loopback_addr().unwrap_or_else(|| {
-        panic!("could not find loopback ipv4 address")
+        panic!("could not find it..")
     });
 
     let local_addr = format!("http://{local_ip:?}:{PORT}");
