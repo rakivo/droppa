@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rayon = "1.10.0"
-paste = "1.0.15"
-anyhow = "1.0.94"
-qrcodegen = "1.8.0"
-actix-web = "4.9.0"
-futures-util = "0.3.31"
-actix-multipart = "0.5.0"
-tokio = { version = "1.42.0", features = ["sync"] }
-tokio-stream = { version = "0.1.17", features = ["sync"] }
-zip = { version = "2.2.1", default-features = false, features = ["deflate"] }
+rayon = "=1.10.0"
+paste = "=1.0.15"
+anyhow = "=1.0.94"
+qrcodegen = "=1.8.0"
+futures-util = "=0.3.31"
+tokio = { version = "=1.42.0", features = ["sync"] }
+tokio-stream = { version = "=0.1.17", features = ["sync"] }
+actix-multipart = { version = "=0.5.0", default-features = false }
+zip = { version = "=2.2.1", default-features = false, features = ["deflate"] }
+actix-web = { version = "=4.9.0", default-features = false, features = ["macros"] }
