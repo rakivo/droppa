@@ -55,69 +55,45 @@
       #status {
         margin-top: 18px;
       }
-      .success {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-family: "Source Code Pro", monospace;
-        font-size: 25px;
-        width: 400px;
-        height: 40px;
-        color: #000;
-        border-radius: 6px;
-        background-color: #12a746;
+      .file_name {
+        width: 200px;
         text-overflow: ellipsis;
         overflow: hidden;
         white-space: nowrap;
       }
-      .idle {
+      .status-message {
+        cursor: default;
         display: flex;
         align-items: center;
         justify-content: center;
         font-family: "Source Code Pro", monospace;
         font-size: 25px;
-        background-color: #d9d9d9;
+        text-overflow: ellipsis;
+        overflow: hidden;
+        white-space: nowrap;
         color: #000;
         width: 400px;
         border-radius: 6px;
         height: 40px;
-        text-overflow: ellipsis;
-        overflow: hidden;
-        white-space: nowrap;
+        gap: 6px;
+      }
+      .success {
+        background-color: #12a746;
       }
       .error {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-family: "Source Code Pro", monospace;
-        font-size: 25px;
         background-color: #a71214;
-        color: #000;
-        width: 400px;
-        border-radius: 6px;
-        height: 40px;
-        text-overflow: ellipsis;
-        overflow: hidden;
-        white-space: nowrap;
       }
       .progress {
-        text-overflow: ellipsis;
-        overflow: hidden;
-        width: 160px;
-        height: 1.2em;
-        white-space: nowrap;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-family: "Source Code Pro", monospace;
-        font-size: 25px;
-        border-radius: 6px;
-        width: 400px;
-        height: 40px;
         color: #000;
-        text-overflow: ellipsis;
-        overflow: hidden;
-        white-space: nowrap;
+      }
+      .idle {
+        background-color: #d9d9d9;
+      }
+      .error {
+        background-color: #a71214;
+      }
+      .progress {
+        background-color: blue;
       }
       #toggle_mode-container {
         margin: 0;
@@ -387,7 +363,7 @@
         </div>
         <div id="menu-active">drop here</div>
       </div>
-      <input type="file" id="file-input" name="files" multiple required />
+      <input type="file" id="file-input" name="files" multiple required/>
       <button type="button" id="upload-button">Upload</button>
     </form>
     <div>

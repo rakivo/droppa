@@ -68,12 +68,10 @@ document
       statusDiv.appendChild(message);
       return;
     }
+
     const files = Array.from(ev.dataTransfer.items);
     files.forEach((file) => {
-      const { message, fileNameSpan, messageStatusDiv } = createMessage(
-        file.getAsFile()
-      );
-
+      const { message, fileNameSpan, messageStatusDiv } = createMessage(file.getAsFile());
       const fullFileObject = {
         status: "idle",
         file: file.getAsFile(),
@@ -159,7 +157,7 @@ async function uploadFile(fileObject) {
   formData.append("file", fileObject.file);
 
   try {
-    console.log(`Opening progress connection for `);
+    console.log(`Opening progress connection for ${fileObject.file.name}`);
     const eventSource = await openProgressConnection(fileObject.file);
 
     console.log("Connection opened");
@@ -170,8 +168,6 @@ async function uploadFile(fileObject) {
       method: "POST",
       body: formData,
     });
-
-    console.log(response);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -214,7 +210,6 @@ async function trackProgress(eventSource, fileObject) {
   let isComplete = false;
 
   eventSource.onmessage = (event) => {
-    console.log(event.data);
     const progressData = JSON.parse(event.data);
     if (progressData.progress !== undefined) {
       const progress = progressData.progress;
