@@ -241,11 +241,12 @@ async fn upload_desktop(mut multipart: Multipart, state: Data::<Server>) -> impl
 async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl Responder {
     println!("[INFO] upload-mobile requested, parsing multipart..");
 
-    let File { bytes, #[cfg(debug_assertions)] mut name } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients)).await {
+    let File { bytes, name } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients)).await {
         Ok(f) => f,
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
 
+    #[cfg(debug_assertions)] let mutname = name;
     #[cfg(debug_assertions)] { name = name + ".test" }
 
     let file = match fs::File::create(&name) {
