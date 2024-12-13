@@ -260,6 +260,8 @@ async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl 
         return HttpResponse::BadRequest().body(format!("could not copy bytes to: {name}: {e}"))
     });
 
+    println!("uploaded: {name}");
+
     HttpResponse::Ok().finish()
 }
 
@@ -281,8 +283,7 @@ async fn download_files(state: web::Data::<Server>) -> impl Responder {
 
     zip.finish().unwrap();
 
-    #[cfg(debug_assertions)]
-    println!("finished zipping up the files, sending to your phone..");
+    println!("[INFO] finished zipping up the files, sending to your phone..");
 
     HttpResponse::Ok()
         .content_type("application/zip")
