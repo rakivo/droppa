@@ -8,9 +8,9 @@ rayon = "=1.10.0"
 paste = "=1.0.15"
 anyhow = "=1.0.94"
 qrcodegen = "=1.8.0"
-futures-util = "=0.3.31"
 tokio = { version = "=1.42.0", features = ["sync"] }
 tokio-stream = { version = "=0.1.17", features = ["sync"] }
+futures-util = { version = "=0.3.31", default-features = false}
 actix-multipart = { version = "=0.5.0", default-features = false }
 zip = { version = "=2.2.1", default-features = false, features = ["deflate"] }
 actix-web = { version = "=4.9.0", default-features = false, features = ["macros"] }
