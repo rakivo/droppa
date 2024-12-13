@@ -246,7 +246,7 @@ async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl 
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
 
-    #[cfg(debug_assertions)] let mutname = name;
+    #[cfg(debug_assertions)] let mut name = name;
     #[cfg(debug_assertions)] { name = name + ".test" }
 
     let file = match fs::File::create(&name) {
