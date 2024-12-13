@@ -1,15 +1,17 @@
 use std::fs;
+use std::sync::Arc;
+use std::future::Future;
 use std::collections::HashMap;
 use std::net::{IpAddr, UdpSocket};
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::io::{Cursor, Write, BufWriter};
 
 use actix_web::{get, post};
 use actix_web::HttpRequest;
 use actix_multipart::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
+use tokio_stream::wrappers::WatchStream;
+use tokio::sync::{watch, Mutex, MutexGuard};
 use futures_util::{StreamExt, TryStreamExt};
-use futures_channel::mpsc::{channel, Sender};
 use zip::{ZipWriter, write::SimpleFileOptions};
 use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Data, Bytes}};
 
@@ -19,17 +21,12 @@ mod stb_image_write;
 mod qr;
 use qr::*;
 
-macro_rules! progress_fmt {
-    ($lit: literal) => { concat!("data: { \"progress\": ", $lit, "}\n\n") };
-    ($expr: expr) => { format!("data: {{ \"progress\": {} }}\n\n", $expr) };
-}
-
 macro_rules! lock_fn {
     ($($field: tt), *) => { $(paste::paste! {
         #[inline]
         #[track_caller]
-        fn [<lock_ $field>](&self) -> MutexGuard::<[<$field:camel>]> {
-            self.$field.lock().unwrap()
+        fn [<lock_ $field>](&self) -> impl Future::<Output = MutexGuard::<[<$field:camel>]>> {
+            self.$field.lock()
         }
     })*};
 }
@@ -51,7 +48,7 @@ macro_rules! define_addr_port {
 
 atomic_type! {
     type Files = Vec::<File>;
-    type Clients = HashMap::<String, Sender::<String>>;
+    type Clients = HashMap::<String, watch::Sender::<u8>>;
 }
 
 define_addr_port! {
@@ -66,22 +63,18 @@ const HOME_DESKTOP_SCRIPT: &[u8] = include_bytes!("index-desktop.js");
 const HOME_MOBILE_HTML:    &[u8] = include_bytes!("index-mobile.html");
 const HOME_MOBILE_SCRIPT:  &[u8] = include_bytes!("index-mobile.js");
 
-const HTTP_OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-
 pub struct File {
     pub name: String,
     pub bytes: Vec::<u8>
 }
 
 impl File {
-    async fn from_multipart(mut multipart: Multipart, clients: AtomicClients) -> Result::<File, &'static str> {
+    async fn from_multipart(multipart: &mut Multipart, clients: AtomicClients) -> Result::<File, &'static str> {
         let mut size = None;
-        let mut name = String::new();
         let mut bytes = Vec::new();
-        let mut clients = clients.lock().unwrap();
-
+        let mut name = String::new();
         while let Some(Ok(field)) = multipart.next().await {
-            if matches!(field.name(), Some(name) if name == "size") {
+            if field.name() == "size" {
                 #[cfg(debug_assertions)]
                 println!("processing `size` field...");
                 let buf = field.try_fold(String::new(), |mut acc, chunk| async move {
@@ -100,31 +93,29 @@ impl File {
             } else {
                 #[cfg(debug_assertions)]
                 println!("processing `file` field...");
-                if let Some(content_disposition) = field.content_disposition() {
-                    if let Some(name_) = content_disposition.get_filename() {
-                        name = name_.to_owned()
-                    }
+
+                if let Some(name_) = field.content_disposition().get_filename() {
+                    name = name_.to_owned()
                 }
 
                 let Some(size) = size else {
                     return Err("invalid size field")
                 };
 
-                bytes = field.try_fold((bytes, {
-                    if let Some(tx) = clients.get_mut(&name) {
-                        tx
-                    } else {
-                        return Err("expected `file_name` to be in clients hashmap")
-                    }
-                }), |(mut bytes, tx), chunk| async move {
+                bytes = field.try_fold((bytes, name.to_owned(), Arc::clone(&clients)), |(mut bytes, name, clients), chunk| async move {
                     bytes.extend_from_slice(&chunk);
-                    let prgrs = (bytes.len() * 100 / size).min(100);
-                    if prgrs % 5 == 0 {
-                        if let Err(e) = tx.try_send(progress_fmt!(prgrs)) {
-                            eprintln!("failed to send progress: {e}");
-                        }
+                    let progress = (bytes.len() * 100 / size).min(100);
+                    if progress % 5 == 0 {
+                    	let mut clients = clients.lock().await;
+                    	let Some(tx) = clients.get_mut(&name) else {
+                    	    println!("no: {name} in the clients hashmap, returning an error..");
+                    	    return Err(actix_multipart::MultipartError::Incomplete)
+                    	};
+                    	if let Err(e) = tx.send(progress as u8) {
+                    	    eprintln!("failed to send progress: {e}");
+                    	}
                     }
-                    Ok((bytes, tx))
+                    Ok((bytes, name, clients))
                 }).await.map_err(|_| "error reading file field")?.0;
             }
         }
@@ -160,21 +151,28 @@ fn user_agent_is_mobile(user_agent: &str) -> bool {
 
 #[get("/progress/{file_name}")]
 async fn track_progress(path: web::Path::<String>, state: Data::<Server>) -> impl Responder {
-    let (mut tx, rx) = channel::<String>(32);
-    tx.try_send(HTTP_OK_RESPONSE.to_owned()).unwrap();
+    let (tx, ..) = watch::channel(0);
     
     let file_name = path.into_inner();
     println!("[INFO] client connected to <http://localhost:8080/progress/{file_name}>");
     
-    let mut clients = state.lock_clients();
-    clients.insert(file_name, tx);
+    println!("inserted: {file_name} into the clients hashmap");
 
-    let stream = rx.map(|data| Ok::<_, actix_web::Error>(data.into()));
+    let rx = WatchStream::new(tx.subscribe());
+    tx.send(0).unwrap();
+
+    {
+        let mut clients = state.lock_clients().await;
+        clients.insert(file_name, tx);
+    }
+
     HttpResponse::Ok()
         .append_header(("Content-Type", "text/event-stream"))
         .append_header(("Cache-Control", "no-cache"))
         .append_header(("Connection", "keep-alive"))
-        .streaming(stream)
+        .streaming(rx.map(|data| {
+            Ok::<_, actix_web::Error>(format!("data: {{ \"progress\": {data} }}\n\n").into())
+        }))
 }
 
 #[get("/")]
@@ -216,10 +214,10 @@ async fn qr_code(state: Data::<Server>) -> impl Responder {
 }
 
 #[post("/upload-desktop")]
-async fn upload_desktop(payload: Multipart, state: Data::<Server>) -> impl Responder {
+async fn upload_desktop(mut multipart: Multipart, state: Data::<Server>) -> impl Responder {
     println!("[INFO] upload-desktop requested, parsing multipart..");
 
-    let File { bytes, name } = match File::from_multipart(payload, Arc::clone(&state.clients)).await {
+    let File { bytes, name } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients)).await {
         Ok(f) => f,
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
@@ -232,15 +230,18 @@ async fn upload_desktop(payload: Multipart, state: Data::<Server>) -> impl Respo
 
     println!("uploaded: {name}");
 
-    state.lock_files().push(File { bytes, name });
+    {
+        state.lock_files().await.push(File { bytes, name });
+    }
+
     HttpResponse::Ok().finish()
 }
 
 #[post("/upload-mobile")]
-async fn upload_mobile(payload: Multipart, state: Data::<Server>) -> impl Responder {
-    println!("[INFO] upload-desktop requested, parsing multipart..");
+async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl Responder {
+    println!("[INFO] upload-mobile requested, parsing multipart..");
 
-    let File { bytes, name } = match File::from_multipart(payload, Arc::clone(&state.clients)).await {
+    let File { bytes, name } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients)).await {
         Ok(f) => f,
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
@@ -267,9 +268,12 @@ async fn download_files(state: web::Data::<Server>) -> impl Responder {
     let mut zip = ZipWriter::new(&mut zip_bytes);
 
     let opts = SimpleFileOptions::default();
-    for file in state.lock_files().iter() {
-        zip.start_file(&file.name, opts).unwrap();
-        zip.write_all(&file.bytes).unwrap();
+
+    {
+        for file in state.lock_files().await.iter() {
+            zip.start_file(&file.name, opts).unwrap();
+            zip.write_all(&file.bytes).unwrap();
+        }
     }
 
     zip.finish().unwrap();
@@ -298,13 +302,15 @@ async fn main() -> std::io::Result<()> {
     let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode URL to QR code");
     println!("serving at: <http://{ADDR_PORT}>");
 
+    let server = Data::new(Server {
+        files: Arc::new(Mutex::new(Vec::new())),
+        clients: Arc::new(Mutex::new(HashMap::new())),
+        qr_bytes: gen_qr_png_bytes(&qr).expect("Could not generate QR code image").into()
+    });
+
     HttpServer::new(move || {
-        App::new()
-            .app_data(Data::new(Server {
-                files: Arc::new(Mutex::new(Vec::new())),
-                clients: Arc::new(Mutex::new(HashMap::new())),
-                qr_bytes: gen_qr_png_bytes(&qr).expect("Could not generate QR code image").into(),
-            })).wrap(Logger::default())
+        App::new().app_data(server.clone())
+            .wrap(Logger::default())
             .service(index)
             .service(qr_code)
             .service(track_progress)

@@ -10,6 +10,7 @@ anyhow = "1.0.94"
 qrcodegen = "1.8.0"
 actix-web = "4.9.0"
 futures-util = "0.3.31"
-actix-multipart = "0.7.2"
-futures-channel = "0.3.31"
+actix-multipart = "0.5.0"
+tokio = { version = "1.42.0", features = ["sync"] }
+tokio-stream = { version = "0.1.17", features = ["sync"] }
 zip = { version = "2.2.1", default-features = false, features = ["deflate"] }
