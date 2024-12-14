@@ -12,8 +12,8 @@ use qrcodegen::{QrCode, QrCodeEcc};
 use actix_web::{get, post, HttpRequest};
 use tokio_stream::wrappers::WatchStream;
 use futures_util::{StreamExt, TryStreamExt};
-use zip::{ZipWriter, write::SimpleFileOptions};
-use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Data, Bytes}};
+use zip::{ZipWriter, CompressionMethod, write::SimpleFileOptions};
+use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Data}};
 
 #[allow(unused_imports, unused_parens, non_camel_case_types, unused_mut, dead_code, unused_assignments, unused_variables, static_mut_refs, non_snake_case, non_upper_case_globals)]
 mod stb_image_write;
@@ -51,7 +51,8 @@ define_addr_port! {
     const PORT: u16 = 6969;
 }
 
-const SIZE_LIMIT: usize = 1024 * 1024 * 1024;
+const GIG: usize = 1024 * 1024 * 1024;
+const SIZE_LIMIT: usize = GIG * 1;
 
 const HOME_DESKTOP_HTML:   &[u8] = include_bytes!("index-desktop.html");
 const HOME_DESKTOP_SCRIPT: &[u8] = include_bytes!("index-desktop.js");
@@ -65,6 +66,7 @@ atomic_type! {
 type Clients = DashMap::<String, watch::Sender::<u8>>;
 
 pub struct File {
+    pub size: usize,
     pub name: String,
     pub bytes: Vec::<u8>
 }
@@ -86,13 +88,13 @@ impl File {
                 if size.is_none() {
                     return Err("invalid size field")
                 }
-                if let Err(..) = bytes.try_reserve_exact(size.unwrap() / 8) {
+                let size = unsafe { size.unwrap_unchecked() };
+                if bytes.try_reserve_exact(size / 8).is_err() {
                     return Err("could not reserve memory")
                 }
                 #[cfg(debug_assertions)]
-                println!("file size: {fs}", fs = size.unwrap());
-
-                if size.unwrap() > SIZE_LIMIT {
+                println!("file size: {size}");
+                if size > SIZE_LIMIT {
                     #[cfg(debug_assertions)]
                     println!("file size exceeds limit, returning bad request..");
                     return Err("file size exceeds limit, returning bad request..")
@@ -101,19 +103,19 @@ impl File {
                 #[cfg(debug_assertions)]
                 println!("processing `file` field...");
 
-                if let Some(name_) = field.content_disposition().get_filename() {
-                    name = name_.to_owned()
-                }
-
                 let Some(size) = size else {
-                    return Err("invalid size field")
+                    return Err("`size` field must go first, not the `file` one")
                 };
 
-                bytes = field.try_fold((bytes, name.to_owned(), clients.borrow_mut()), |(mut bytes, name, clients), chunk| async move {
+                _ = field.content_disposition()
+                    .get_filename()
+                    .map(|name_| name = name_.to_owned());
+
+                bytes = field.try_fold((bytes, &name, clients.borrow_mut()), |(mut bytes, name, clients), chunk| async move {
                     bytes.extend_from_slice(&chunk);
                     let progress = (bytes.len() * 100 / size).min(100);
                     if progress % 5 == 0 {
-                    	let Some(tx) = clients.get_mut(&name) else {
+                    	let Some(tx) = clients.get_mut(name) else {
                     	    println!("no: {name} in the clients hashmap, returning an error..");
                     	    return Err(actix_multipart::MultipartError::Incomplete)
                     	};
@@ -126,14 +128,14 @@ impl File {
             }
         }
 
-        Ok(File {bytes, name})
+        Ok(File { bytes, name, size: size.unwrap() })
     }
 }
 
 #[derive(Clone)]
 struct Server {
-    qr_bytes: Bytes,
     files: AtomicFiles,
+    qr_bytes: web::Bytes,
     clients: Arc::<Clients>
 }
 
@@ -215,14 +217,14 @@ async fn index_desktop_js() -> impl Responder {
 async fn qr_code(state: Data::<Server>) -> impl Responder {
     HttpResponse::Ok()
         .content_type("image/png")
-        .body(state.qr_bytes.clone())
+        .body(web::Bytes::clone(&state.qr_bytes))
 }
 
 #[post("/upload-desktop")]
 async fn upload_desktop(mut multipart: Multipart, state: Data::<Server>) -> impl Responder {
     println!("[INFO] upload-desktop requested, parsing multipart..");
 
-    let File { bytes, name } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients)).await {
+    let File { bytes, name, size } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients)).await {
         Ok(f) => f,
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
@@ -230,7 +232,7 @@ async fn upload_desktop(mut multipart: Multipart, state: Data::<Server>) -> impl
     println!("[INFO] uploaded: {name}");
 
     {
-        state.lock_files().push(File { bytes, name });
+        state.lock_files().push(File { bytes, name, size });
     }
 
     HttpResponse::Ok().finish()
@@ -240,7 +242,7 @@ async fn upload_desktop(mut multipart: Multipart, state: Data::<Server>) -> impl
 async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl Responder {
     println!("[INFO] upload-mobile requested, parsing multipart..");
 
-    let File { bytes, name } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients)).await {
+    let File { bytes, name, size } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients)).await {
         Ok(f) => f,
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
@@ -254,14 +256,14 @@ async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl 
             Err(e) => return Err(format!("could not create file: {name}: {e}"))
         };
 
-        println!("copying bytes to: {name}..");
+        println!("[INFO] copying bytes to: {name}..");
 
-        let mut wbuf = BufWriter::new(file);
+        let mut wbuf = BufWriter::with_capacity(size, file);
         _ = wbuf.write_all(&bytes).map_err(|e| {
             return format!("could not copy bytes: {name}: {e}")
         });
 
-        println!("uploaded: {name}");
+        println!("[INFO] uploaded: {name}");
 
         Ok(())
     }).await {
@@ -277,14 +279,25 @@ async fn download_files(state: web::Data::<Server>) -> impl Responder {
 
     let files = Arc::clone(&state.files);
     let Ok(Ok(zip_bytes)) = actix_rt::task::spawn_blocking(move || {
-        let mut zip_bytes = Cursor::new(Vec::new());
-        let mut zip = ZipWriter::new(&mut zip_bytes);
-        let opts = SimpleFileOptions::default();
+        let files = files.lock().unwrap();
+        let size = files.iter().map(|f| f.size).sum::<usize>();
 
-        for file in files.lock().unwrap().iter() {
-            zip.start_file(&file.name, opts)?;
-            zip.write_all(&file.bytes)?;
+        let mut zip_bytes = Cursor::new(Vec::with_capacity(size));
+        let mut zip = ZipWriter::new(&mut zip_bytes);
+        let mut opts = SimpleFileOptions::default()
+            .compression_level(Some(8))
+            .compression_method(CompressionMethod::Deflated);
+
+        if size > const { GIG * 4 } || files.len() > 65536 {
+            opts = opts.large_file(true);
         }
+
+        for File { name, bytes, .. } in files.iter() {
+            zip.start_file(&name, opts)?;
+            zip.write_all(&bytes)?;
+        }
+
+        drop(files);
 
         zip.finish().map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
@@ -311,13 +324,12 @@ fn get_default_local_ip_addr() -> Option::<IpAddr> {
 async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
-    println!("looking for default local IP address...");
+    println!("[INFO] looking for default local IP address...");
     let local_ip = get_default_local_ip_addr().unwrap_or_else(|| panic!("could not find local IP address"));
 
-    println!("found: {local_ip}, using it to generate QR code...");
+    println!("[INFO] found: {local_ip}, using it to generate QR code...");
     let local_addr = format!("http://{local_ip}:{PORT}");
     let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode URL to QR code");
-    println!("serving at: <http://{ADDR_PORT}>");
 
     let server = Data::new(Server {
         clients: Arc::new(DashMap::new()),
@@ -325,14 +337,16 @@ async fn main() -> std::io::Result<()> {
         qr_bytes: gen_qr_png_bytes(&qr).expect("Could not generate QR code image").into()
     });
 
+    println!("[INFO] serving at: <http://{ADDR_PORT}>");
     HttpServer::new(move || {
-        App::new().app_data(server.clone())
+        App::new()
+            .app_data(Data::clone(&server))
             .wrap(Logger::default())
             .service(index)
             .service(qr_code)
+            .service(upload_mobile)
             .service(track_progress)
             .service(download_files)
-            .service(upload_mobile)
             .service(upload_desktop)
             .service(index_mobile_js)
             .service(index_desktop_js)

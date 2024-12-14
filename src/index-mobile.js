@@ -99,9 +99,10 @@ document
       })
       .then(blob => {
         const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);  // Create a download URL for the blob
-        link.download = 'example.zip';  // Set the default filename
-        link.click();  // Simulate a click to trigger the download
+        link.href = URL.createObjectURL(blob);
+        link.download = 'example.zip';
+        link.click();
+        URL.revokeObjectURL(link.href);
       })
       .catch(error => {
         console.error('Error downloading file:', error);
