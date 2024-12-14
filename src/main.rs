@@ -78,30 +78,31 @@ impl File {
         let mut name = String::new();
         while let Some(Ok(field)) = multipart.next().await {
             if field.name() == "size" {
-                #[cfg(debug_assertions)]
-                println!("processing `size` field...");
+                #[cfg(debug_assertions)] println!("processing `size` field...");
+
                 let buf = field.try_fold(String::new(), |mut acc, chunk| async move {
                     acc.push_str(std::str::from_utf8(&chunk).unwrap());
                     Ok(acc)
                 }).await.map_err(|_| "error reading size field")?;
+
                 size = buf.parse::<usize>().ok();
                 if size.is_none() {
                     return Err("invalid size field")
                 }
+
                 let size = unsafe { size.unwrap_unchecked() };
                 if bytes.try_reserve_exact(size / 8).is_err() {
                     return Err("could not reserve memory")
                 }
-                #[cfg(debug_assertions)]
-                println!("file size: {size}");
+
+                #[cfg(debug_assertions)] println!("file size: {size}");
+
                 if size > SIZE_LIMIT {
-                    #[cfg(debug_assertions)]
-                    println!("file size exceeds limit, returning bad request..");
+                    #[cfg(debug_assertions)] println!("file size exceeds limit, returning bad request..");
                     return Err("file size exceeds limit, returning bad request..")
                 }
             } else {
-                #[cfg(debug_assertions)]
-                println!("processing `file` field...");
+                #[cfg(debug_assertions)] println!("processing `file` field...");
 
                 let Some(size) = size else {
                     return Err("`size` field must go first, not the `file` one")
@@ -128,7 +129,7 @@ impl File {
             }
         }
 
-        Ok(File { bytes, name, size: size.unwrap() })
+        Ok(File { bytes, name, size: unsafe { size.unwrap_unchecked() } })
     }
 }
 
@@ -162,16 +163,11 @@ async fn track_progress(path: web::Path::<String>, state: Data::<Server>) -> imp
     let (tx, ..) = watch::channel(0);
     
     let file_name = path.into_inner();
-
     println!("[INFO] client connected to <http://localhost:8080/progress/{file_name}>");
     
     let rx = WatchStream::new(tx.subscribe());
-    tx.send(0).unwrap();
-
-    {
-        println!("[INFO] inserted: {file_name} into the clients hashmap");
-        state.clients.insert(file_name, tx);
-    }
+    println!("[INFO] inserted: {file_name} into the clients hashmap");
+    state.clients.insert(file_name, tx);
 
     HttpResponse::Ok()
         .append_header(("Content-Type", "text/event-stream"))
