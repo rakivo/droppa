@@ -1,4 +1,4 @@
-globalFiles = [];
+let globalFiles = [];
 
 window.addEventListener("load", () => {
   const qrcodeContainer = document.getElementById("qrcode-container");
@@ -30,8 +30,7 @@ document
   .getElementById("drag_and_drop-menu")
   .addEventListener("dragover", (e) => {
     e.preventDefault();
-    document.getElementById("drag_and_drop-menu").className =
-      "drag_and_drop-menu-active";
+    document.getElementById("drag_and_drop-menu").className = "drag_and_drop-menu-active";
     document.getElementById("menu").style.display = "none";
     document.getElementById("menu-active").style.display = "block";
   });
@@ -40,8 +39,7 @@ document
   .getElementById("drag_and_drop-menu")
   .addEventListener("dragend", () => {
     e.preventDefault();
-    document.getElementById("drag_and_drop-menu").className =
-      "drag_and_drop-menu";
+    document.getElementById("drag_and_drop-menu").className = "drag_and_drop-menu";
     document.getElementById("menu").style.display = "flex";
     document.getElementById("menu-active").style.display = "none";
   });
@@ -49,17 +47,12 @@ document
 document
   .getElementById("drag_and_drop-menu")
   .addEventListener("drop", async function dropHandler(ev) {
-    console.log("File(s) dropped");
-
-    document.getElementById("drag_and_drop-menu").className =
-      "drag_and_drop-menu";
-    document.getElementById("menu").style.display = "flex";
-    document.getElementById("menu-active").style.display = "none";
-
+    ev.preventDefault();
     const statusDiv = document.getElementById("status");
 
-    // Prevent default behavior (Prevent file from being opened)
-    ev.preventDefault();
+    document.getElementById("drag_and_drop-menu").className = "drag_and_drop-menu";
+    document.getElementById("menu").style.display = "flex";
+    document.getElementById("menu-active").style.display = "none";
 
     if (!ev.dataTransfer.items) {
       const message = document.createElement("div");
@@ -87,7 +80,6 @@ document
   .getElementById("upload-button")
   .addEventListener("click", async (e) => {
     e.preventDefault();
-    const fileInput = document.getElementById("file-input");
     const statusDiv = document.getElementById("status");
 
     if (!globalFiles.length) {
@@ -98,20 +90,16 @@ document
       return;
     }
 
-    const uploadPromises = globalFiles.map((fileObject) => {
-      uploadFile(fileObject);
-    });
-    await Promise.all(uploadPromises);
+    await uploadFilesConcurrently(globalFiles, 4);
   });
 
 document.getElementById("file-input").addEventListener("change", (e) => {
-  console.log(e);
-  Array.from(e.target.files).forEach((e) => {
-    const { message, fileNameSpan, messageStatusDiv } = createMessage(e);
+  Array.from(e.target.files).forEach((file) => {
+    const { message, fileNameSpan, messageStatusDiv } = createMessage(file);
 
     const fullFileObject = {
       status: "idle",
-      file: e,
+      file: file,
       message: message,
       fileNameSpan: fileNameSpan,
       messageStatusDiv: messageStatusDiv,
@@ -119,7 +107,6 @@ document.getElementById("file-input").addEventListener("change", (e) => {
 
     globalFiles.push(fullFileObject);
   });
-  console.log(e);
 });
 
 function createMessage(file) {
@@ -147,8 +134,17 @@ function createMessage(file) {
   };
 }
 
+async function uploadFilesConcurrently(files, maxConcurrent = 4) {
+  const semaphore = new Array(maxConcurrent).fill(Promise.resolve());
+  for (const fileObject of files) {
+    const slot = semaphore.shift();
+    semaphore.push(slot.then(() => uploadFile(fileObject)));
+  }
+  await Promise.all(semaphore);
+}
+
 async function uploadFile(fileObject) {
-  if (fileObject.status == "success" || fileObject.status == "progress") {
+  if (fileObject.status === "success" || fileObject.status === "progress") {
     return;
   }
 
@@ -163,7 +159,7 @@ async function uploadFile(fileObject) {
     console.log("Connection opened");
     trackProgress(eventSource, fileObject);
 
-    console.log("Sending upload request..");
+    console.log("Sending upload request...");
     const response = await fetch("/upload-desktop", {
       method: "POST",
       body: formData,
