@@ -247,18 +247,25 @@ async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl 
     #[cfg(debug_assertions)] let mut name = name;
     #[cfg(debug_assertions)] { name = name + ".test" }
 
-    let file = match fs::File::create(&name) {
-        Ok(f) => f,
-        Err(e) => return HttpResponse::BadRequest().body(format!("could not create file: {name}: {e}"))
-    };
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+        let file = match fs::File::create(&name) {
+            Ok(f) => f,
+            Err(e) => return Err(format!("could not create file: {name}: {e}"))
+        };
 
-    println!("copying bytes to: {name}..");
-    let mut wbuf = BufWriter::new(file);
-    _ = wbuf.write_all(&bytes).map_err(|e| {
-        return HttpResponse::BadRequest().body(format!("could not copy bytes to: {name}: {e}"))
-    });
+        println!("copying bytes to: {name}..");
 
-    println!("uploaded: {name}");
+        let mut wbuf = BufWriter::new(file);
+        _ = wbuf.write_all(&bytes).map_err(|e| {
+            return format!("could not copy bytes: {name}: {e}")
+        });
+
+        println!("uploaded: {name}");
+
+        Ok(())
+    }).await {
+        return HttpResponse::SeeOther().body(format!("error copying bytes: {e}"))
+    }
 
     HttpResponse::Ok().finish()
 }
@@ -288,7 +295,6 @@ async fn download_files(state: web::Data::<Server>) -> impl Responder {
     };
 
     println!("[INFO] finished zipping up the files, sending to your phone..");
-
     HttpResponse::Ok()
         .content_type("application/zip")
         .body(zip_bytes)
