@@ -239,77 +239,26 @@ async fn upload_desktop(mut multipart: Multipart, state: Data::<Server>) -> impl
 async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl Responder {
     println!("[INFO] upload-mobile requested, parsing multipart..");
 
-    let mut size = None;
-    while let Some(Ok(field)) = multipart.next().await {
-        if field.name() == "size" {
-            #[cfg(debug_assertions)]
-            println!("processing `size` field...");
-            let Ok(buf) = field.try_fold(String::new(), |mut acc, chunk| async move {
-                acc.push_str(std::str::from_utf8(&chunk).unwrap());
-                Ok(acc)
-            }).await else {
-                return HttpResponse::BadRequest().body("error reading `size` field")
-            };
-            size = buf.parse::<usize>().ok();
-            if size.is_none() {
-                return HttpResponse::BadRequest().body("invalid size field")
-            }
-            #[cfg(debug_assertions)]
-            println!("file size: {fs}", fs = size.unwrap());
-            if size.unwrap() > SIZE_LIMIT {
-                #[cfg(debug_assertions)]
-                println!("file size exceeds limit, returning bad request..");
-                return HttpResponse::BadRequest().body("file size exceeds limit")
-            }
-        } else {
-            #[cfg(debug_assertions)]
-            println!("processing `file` field...");
+    let File { bytes, name } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients)).await {
+        Ok(f) => f,
+        Err(e) => return HttpResponse::BadRequest().body(e)
+    };
 
-            let Some(name) = field.content_disposition().get_filename().map(ToOwned::to_owned) else {
-                return HttpResponse::BadRequest().body("invalid `file` field, no name")
-            };
+    #[cfg(debug_assertions)] let mut name = name;
+    #[cfg(debug_assertions)] { name = name + ".test" }
 
-            #[cfg(debug_assertions)] let mut name = name;
-            #[cfg(debug_assertions)] { name = name + ".test" }
+    let file = match fs::File::create(&name) {
+        Ok(f) => f,
+        Err(e) => return HttpResponse::BadRequest().body(format!("could not create file: {name}: {e}"))
+    };
 
-            let Some(size) = size else {
-                return HttpResponse::BadRequest().body("`file` field should go after `size` field")
-            };
+    println!("copying bytes to: {name}..");
+    let mut wbuf = BufWriter::new(file);
+    _ = wbuf.write_all(&bytes).map_err(|e| {
+        return HttpResponse::BadRequest().body(format!("could not copy bytes to: {name}: {e}"))
+    });
 
-            let Ok(file) = fs::File::create(&name) else {
-                return HttpResponse::BadRequest().body(format!("could not create file: {name}"))
-            };
-
-            let mut clients = Arc::clone(&state.clients);
-
-            println!("[INFO] copying bytes to: {name}..");
-
-            if let Err(e) = field.try_fold((BufWriter::new(file), 0, &name, clients.borrow_mut()), |(mut wbuf, mut written, name, clients), chunk| async move {
-                match wbuf.write(&chunk) {
-                    Ok(count) => written += count,
-                    Err(e) => {
-                  	    eprintln!("failed to write bytes to: {name}: {e}");
-                 	    return Err(actix_multipart::MultipartError::Incomplete)
-                    }
-                }
-
-                let progress = (written * 100 / size).min(100);
-                if progress % 5 == 0 {
-                    let Some(tx) = clients.get_mut(name) else {
-                    	eprintln!("no: {name} in the clients hashmap, returning an error..");
-                    	return Err(actix_multipart::MultipartError::Incomplete)
-                    };
-                    if let Err(e) = tx.send(progress as u8) {
-                    	eprintln!("failed to send progress: {e}");
-                    }
-                }
-
-                Ok((wbuf, written, name, clients))
-            }).await {
-                return HttpResponse::BadRequest().body(format!("could not copy bytes to: {name}: {e}"))
-            }
-        }
-    }
+    println!("uploaded: {name}");
 
     HttpResponse::Ok().finish()
 }
