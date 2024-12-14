@@ -6,6 +6,7 @@ use std::io::{Cursor, Write, BufWriter};
 
 use dashmap::DashMap;
 use tokio::sync::watch;
+use actix_web::rt as actix_rt;
 use actix_multipart::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
 use actix_web::{get, post, HttpRequest};
@@ -247,7 +248,7 @@ async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl 
     #[cfg(debug_assertions)] let mut name = name;
     #[cfg(debug_assertions)] { name = name + ".test" }
 
-    if let Err(e) = tokio::task::spawn_blocking(move || {
+    if let Err(e) = actix_rt::task::spawn_blocking(move || {
         let file = match fs::File::create(&name) {
             Ok(f) => f,
             Err(e) => return Err(format!("could not create file: {name}: {e}"))
@@ -275,7 +276,7 @@ async fn download_files(state: web::Data::<Server>) -> impl Responder {
     println!("[INFO] download files requested, zipping them up..");
 
     let files = Arc::clone(&state.files);
-    let Ok(Ok(zip_bytes)) = tokio::task::spawn_blocking(move || {
+    let Ok(Ok(zip_bytes)) = actix_rt::task::spawn_blocking(move || {
         let mut zip_bytes = Cursor::new(Vec::new());
         let mut zip = ZipWriter::new(&mut zip_bytes);
         let opts = SimpleFileOptions::default();
