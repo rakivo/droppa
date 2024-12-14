@@ -333,7 +333,7 @@ async fn main() -> std::io::Result<()> {
         qr_bytes: gen_qr_png_bytes(&qr).expect("Could not generate QR code image").into()
     });
 
-    println!("[INFO] serving at: <http://{ADDR_PORT}>");
+    println!("[INFO] serving at: <http://{local_ip}:{PORT}>");
     HttpServer::new(move || {
         App::new()
             .app_data(Data::clone(&server))
@@ -346,5 +346,5 @@ async fn main() -> std::io::Result<()> {
             .service(upload_desktop)
             .service(index_mobile_js)
             .service(index_desktop_js)
-    }).bind((ADDR, PORT))?.run().await
+    }).bind((local_ip.to_string(), PORT))?.run().await
 }
