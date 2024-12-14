@@ -1,14 +1,14 @@
 use std::fs;
 use std::sync::Arc;
 use std::future::Future;
-use std::collections::HashMap;
+use std::borrow::BorrowMut;
 use std::net::{IpAddr, UdpSocket};
 use std::io::{Cursor, Write, BufWriter};
 
-use actix_web::{get, post};
-use actix_web::HttpRequest;
+use dashmap::DashMap;
 use actix_multipart::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
+use actix_web::{get, post, HttpRequest};
 use tokio_stream::wrappers::WatchStream;
 use tokio::sync::{watch, Mutex, MutexGuard};
 use futures_util::{StreamExt, TryStreamExt};
@@ -21,6 +21,13 @@ mod stb_image_write;
 mod qr;
 use qr::*;
 
+macro_rules! atomic_type {
+    ($(type $name: ident = $ty: ty;)*) => {$(paste::paste! {
+        #[allow(unused)] type $name = $ty;
+        #[allow(unused)] type [<Atomic $name>] = Arc::<Mutex::<$ty>>;
+    })*};
+}
+
 macro_rules! lock_fn {
     ($($field: tt), *) => { $(paste::paste! {
         #[inline]
@@ -31,24 +38,12 @@ macro_rules! lock_fn {
     })*};
 }
 
-macro_rules! atomic_type {
-    ($(type $name: ident = $ty: ty;)*) => {$(paste::paste! {
-        #[allow(unused)] type $name = $ty;
-        #[allow(unused)] type [<Atomic $name>] = Arc::<Mutex::<$ty>>;
-    })*};
-}
-
 macro_rules! define_addr_port {
     (const ADDR: $addr_ty: ty = $addr: literal; const PORT: $port_ty: ty = $port: literal;) => {
         #[allow(unused)] const ADDR: $addr_ty = $addr;
         #[allow(unused)] const PORT: $port_ty = $port;
         #[allow(unused)] const ADDR_PORT: &str = concat!($addr, ':', $port);
     };
-}
-
-atomic_type! {
-    type Files = Vec::<File>;
-    type Clients = HashMap::<String, watch::Sender::<u8>>;
 }
 
 define_addr_port! {
@@ -63,13 +58,19 @@ const HOME_DESKTOP_SCRIPT: &[u8] = include_bytes!("index-desktop.js");
 const HOME_MOBILE_HTML:    &[u8] = include_bytes!("index-mobile.html");
 const HOME_MOBILE_SCRIPT:  &[u8] = include_bytes!("index-mobile.js");
 
+atomic_type! {
+    type Files = Vec::<File>;
+}
+
+type Clients = DashMap::<String, watch::Sender::<u8>>;
+
 pub struct File {
     pub name: String,
     pub bytes: Vec::<u8>
 }
 
 impl File {
-    async fn from_multipart(multipart: &mut Multipart, clients: AtomicClients) -> Result::<File, &'static str> {
+    async fn from_multipart(multipart: &mut Multipart, mut clients: Arc::<Clients>) -> Result::<File, &'static str> {
         let mut size = None;
         let mut bytes = Vec::new();
         let mut name = String::new();
@@ -102,11 +103,10 @@ impl File {
                     return Err("invalid size field")
                 };
 
-                bytes = field.try_fold((bytes, name.to_owned(), Arc::clone(&clients)), |(mut bytes, name, clients), chunk| async move {
+                bytes = field.try_fold((bytes, name.to_owned(), clients.borrow_mut()), |(mut bytes, name, clients), chunk| async move {
                     bytes.extend_from_slice(&chunk);
                     let progress = (bytes.len() * 100 / size).min(100);
                     if progress % 5 == 0 {
-                    	let mut clients = clients.lock().await;
                     	let Some(tx) = clients.get_mut(&name) else {
                     	    println!("no: {name} in the clients hashmap, returning an error..");
                     	    return Err(actix_multipart::MultipartError::Incomplete)
@@ -128,11 +128,11 @@ impl File {
 struct Server {
     qr_bytes: Bytes,
     files: AtomicFiles,
-    clients: AtomicClients
+    clients: Arc::<Clients>
 }
 
 impl Server {
-    lock_fn! { files, clients }
+    lock_fn! { files }
 }
 
 #[inline]
@@ -154,16 +154,15 @@ async fn track_progress(path: web::Path::<String>, state: Data::<Server>) -> imp
     let (tx, ..) = watch::channel(0);
     
     let file_name = path.into_inner();
+
     println!("[INFO] client connected to <http://localhost:8080/progress/{file_name}>");
     
-    println!("inserted: {file_name} into the clients hashmap");
-
     let rx = WatchStream::new(tx.subscribe());
     tx.send(0).unwrap();
 
     {
-        let mut clients = state.lock_clients().await;
-        clients.insert(file_name, tx);
+        println!("[INFO] inserted: {file_name} into the clients hashmap");
+        state.clients.insert(file_name, tx);
     }
 
     HttpResponse::Ok()
@@ -298,6 +297,8 @@ fn get_default_local_ip_addr() -> Option::<IpAddr> {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+
     println!("looking for default local IP address...");
     let local_ip = get_default_local_ip_addr().unwrap_or_else(|| panic!("could not find local IP address"));
 
@@ -307,8 +308,8 @@ async fn main() -> std::io::Result<()> {
     println!("serving at: <http://{ADDR_PORT}>");
 
     let server = Data::new(Server {
+        clients: Arc::new(DashMap::new()),
         files: Arc::new(Mutex::new(Vec::new())),
-        clients: Arc::new(Mutex::new(HashMap::new())),
         qr_bytes: gen_qr_png_bytes(&qr).expect("Could not generate QR code image").into()
     });
 
