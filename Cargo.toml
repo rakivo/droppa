@@ -3,6 +3,10 @@ name = "droppa"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "droppa"
+path = "back/main.rs"
+
 [dependencies]
 paste = "=1.0.15"
 qrcodegen = "=1.8.0"

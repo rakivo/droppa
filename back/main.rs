@@ -54,10 +54,10 @@ define_addr_port! {
 const GIG: usize = 1024 * 1024 * 1024;
 const SIZE_LIMIT: usize = GIG * 1;
 
-const HOME_DESKTOP_HTML:   &[u8] = include_bytes!("index-desktop.html");
-const HOME_DESKTOP_SCRIPT: &[u8] = include_bytes!("index-desktop.js");
-const HOME_MOBILE_HTML:    &[u8] = include_bytes!("index-mobile.html");
-const HOME_MOBILE_SCRIPT:  &[u8] = include_bytes!("index-mobile.js");
+const HOME_DESKTOP_HTML:   &[u8] = include_bytes!("../front/index-desktop.html");
+const HOME_DESKTOP_SCRIPT: &[u8] = include_bytes!("../front/index-desktop.js");
+const HOME_MOBILE_HTML:    &[u8] = include_bytes!("../front/index-mobile.html");
+const HOME_MOBILE_SCRIPT:  &[u8] = include_bytes!("../front/index-mobile.js");
 
 atomic_type! {
     type Files = Vec::<File>;
