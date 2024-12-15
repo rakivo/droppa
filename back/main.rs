@@ -116,13 +116,13 @@ impl File {
                     bytes.extend_from_slice(&chunk);
                     let progress = (bytes.len() * 100 / size).min(100);
                     if progress % 5 == 0 {
-                    	let Some(tx) = clients.get_mut(name) else {
-                    	    println!("no: {name} in the clients hashmap, returning an error..");
-                    	    return Err(actix_multipart::MultipartError::Incomplete)
-                    	};
-                    	if let Err(e) = tx.send(progress as u8) {
-                    	    eprintln!("failed to send progress: {e}");
-                    	}
+                        let Some(tx) = clients.get_mut(name) else {
+                            println!("[ERROR] no: {name} in the clients hashmap, returning an error..");
+                            return Err(actix_multipart::MultipartError::Incomplete)
+                        };
+                        if let Err(e) = tx.send(progress as u8) {
+                            eprintln!("[ERROR] failed to send progress: {e}");
+                        }
                     }
                     Ok((bytes, name, clients))
                 }).await.map_err(|_| "error reading file field")?.0;
@@ -160,7 +160,7 @@ fn user_agent_is_mobile(user_agent: &str) -> bool {
 
 #[get("/progress/{file_name}")]
 async fn track_progress(path: web::Path::<String>, state: Data::<Server>) -> impl Responder {
-    let (tx, ..) = watch::channel(0);
+    let tx = watch::channel(0).0;
     
     let file_name = path.into_inner();
     println!("[INFO] client connected to <http://localhost:8080/progress/{file_name}>");
