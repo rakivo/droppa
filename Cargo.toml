@@ -8,13 +8,15 @@ name = "droppa"
 path = "back/main.rs"
 
 [dependencies]
-paste = "=1.0.15"
-qrcodegen = "=1.8.0"
-tokio = { version = "=1.42.0", features = ["sync"] }
-dashmap = { version = "=6.1.0", features = ["inline"] }
-tokio-stream = { version = "=0.1.17", features = ["sync"] }
-env_logger = { version = "0.11.5", default-features = false }
-futures-util = { version = "=0.3.31", default-features = false }
-actix-multipart = { version = "=0.5.0", default-features = false }
-zip = { version = "=2.2.1", default-features = false, features = ["deflate"] }
-actix-web = { version = "=4.9.0", default-features = false, features = ["macros"] }
+paste           = "=1.0.15"
+qrcodegen       = "=1.8.0"
+env_logger      = { version = "0.11.5",  default-features = false }
+futures-util    = { version = "=0.3.31", default-features = false }
+actix-multipart = { version = "=0.5.0",  default-features = false }
+tokio-stream    = { version = "=0.1.17",                           features = ["sync"]    }
+tokio           = { version = "=1.42.0",                           features = ["sync"]    }
+dashmap         = { version = "=6.1.0",                            features = ["inline"]  }
+serde           = { version = "1.0.216", features = ["derive"] }
+actix-web       = { version = "=4.9.0",  default-features = false, features = ["macros"]  }
+zip             = { version = "=2.2.1",  default-features = false, features = ["deflate"] }
+serde_json = "1.0.133"

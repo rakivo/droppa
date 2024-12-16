@@ -1,14 +1,14 @@
 use std::fs;
-use std::borrow::BorrowMut;
 use std::net::{IpAddr, UdpSocket};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::io::{Cursor, Write, BufWriter};
 
+use serde::Serialize;
 use dashmap::DashMap;
-use tokio::sync::watch;
 use actix_web::rt as actix_rt;
 use actix_multipart::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
+use tokio::sync::{mpsc, watch};
 use actix_web::{get, post, HttpRequest};
 use tokio_stream::wrappers::WatchStream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -63,7 +63,22 @@ atomic_type! {
     type Files = Vec::<File>;
 }
 
-type Clients = DashMap::<String, watch::Sender::<u8>>;
+#[derive(Debug, Serialize)]
+pub struct TrackFile {
+    pub size: usize,
+    pub name: String,
+    pub progress: u8
+}
+
+pub struct ProgressSender {
+    sender: watch::Sender::<u8>,
+    progress: u8,
+    mobile: bool
+}
+
+type ProgressPinger = Arc::<tokio::sync::Mutex::<Option::<mpsc::Sender::<()>>>>;
+
+type Clients = DashMap::<String, ProgressSender>;
 
 pub struct File {
     pub size: usize,
@@ -72,7 +87,7 @@ pub struct File {
 }
 
 impl File {
-    async fn from_multipart(multipart: &mut Multipart, mut clients: Arc::<Clients>) -> Result::<File, &'static str> {
+    async fn from_multipart(multipart: &mut Multipart, clients: Arc::<Clients>, pp: ProgressPinger) -> Result::<File, &'static str> {
         let mut size = None;
         let mut bytes = Vec::new();
         let mut name = String::new();
@@ -112,19 +127,25 @@ impl File {
                     .get_filename()
                     .map(|name_| name = name_.to_owned());
 
-                bytes = field.try_fold((bytes, &name, clients.borrow_mut()), |(mut bytes, name, clients), chunk| async move {
+                bytes = field.try_fold((bytes, &name, &clients, &pp), |(mut bytes, name, clients, pp), chunk| async move {
                     bytes.extend_from_slice(&chunk);
-                    let progress = (bytes.len() * 100 / size).min(100);
+                    let progress = (bytes.len() * 100 / size).min(100) as u8;
                     if progress % 5 == 0 {
-                        let Some(tx) = clients.get_mut(name) else {
+                        let Some(mut ps) = clients.get_mut(name) else {
                             println!("[ERROR] no: {name} in the clients hashmap, returning an error..");
                             return Err(actix_multipart::MultipartError::Incomplete)
                         };
-                        if let Err(e) = tx.send(progress as u8) {
+                        ps.progress = progress;
+                        if let Err(e) = ps.sender.send(progress) {
                             eprintln!("[ERROR] failed to send progress: {e}");
                         }
+                        if let Ok(pp) = pp.try_lock() {
+                            if let Some(pp) = pp.as_ref() {
+                                pp.send(()).await.unwrap()
+                            }
+                        }
                     }
-                    Ok((bytes, name, clients))
+                    Ok((bytes, name, clients, pp))
                 }).await.map_err(|_| "error reading file field")?.0;
             }
         }
@@ -137,7 +158,8 @@ impl File {
 struct Server {
     files: AtomicFiles,
     qr_bytes: web::Bytes,
-    clients: Arc::<Clients>
+    clients: Arc::<Clients>,
+    progress_tx: ProgressPinger,
 }
 
 impl Server {
@@ -159,7 +181,11 @@ fn user_agent_is_mobile(user_agent: &str) -> bool {
 }
 
 #[get("/progress/{file_name}")]
-async fn track_progress(path: web::Path::<String>, state: Data::<Server>) -> impl Responder {
+async fn track_progress(rq: HttpRequest, path: web::Path::<String>, state: Data::<Server>) -> impl Responder {
+    let Some(user_agent) = rq.headers().get("User-Agent").and_then(|header| header.to_str().ok()) else {
+        return HttpResponse::BadRequest().body("Request to `/` that does not contain user agent")
+    };
+
     let tx = watch::channel(0).0;
     
     let file_name = path.into_inner();
@@ -167,7 +193,11 @@ async fn track_progress(path: web::Path::<String>, state: Data::<Server>) -> imp
     
     let rx = WatchStream::new(tx.subscribe());
     println!("[INFO] inserted: {file_name} into the clients hashmap");
-    state.clients.insert(file_name, tx);
+    state.clients.insert(file_name, ProgressSender {
+        sender: tx,
+        progress: 0,
+        mobile: user_agent_is_mobile(user_agent)
+    });
 
     HttpResponse::Ok()
         .append_header(("Content-Type", "text/event-stream"))
@@ -220,7 +250,7 @@ async fn qr_code(state: Data::<Server>) -> impl Responder {
 async fn upload_desktop(mut multipart: Multipart, state: Data::<Server>) -> impl Responder {
     println!("[INFO] upload-desktop requested, parsing multipart..");
 
-    let File { bytes, name, size } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients)).await {
+    let File { bytes, name, size } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients), Arc::clone(&state.progress_tx)).await {
         Ok(f) => f,
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
@@ -238,7 +268,7 @@ async fn upload_desktop(mut multipart: Multipart, state: Data::<Server>) -> impl
 async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl Responder {
     println!("[INFO] upload-mobile requested, parsing multipart..");
 
-    let File { bytes, name, size } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients)).await {
+    let File { bytes, name, size } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients), Arc::clone(&state.progress_tx)).await {
         Ok(f) => f,
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
@@ -310,6 +340,44 @@ async fn download_files(state: web::Data::<Server>) -> impl Responder {
         .body(zip_bytes)
 }
 
+#[get("/download-files-progress-mobile")]
+async fn download_files_progress_mobile(state: Data::<Server>) -> impl Responder {
+    let ptx = watch::channel("[]".to_owned()).0;
+    println!("[INFO] client connected to <http://localhost:8080/download-files-progress-desktop>");
+
+    let prx = WatchStream::new(ptx.subscribe());
+
+    let (tx, mut rx) = mpsc::channel(8);
+
+    *state.progress_tx.lock().await = Some(tx);
+
+    actix_rt::spawn(async move {
+        loop {
+            if rx.try_recv().is_err() {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                continue
+            }
+
+            let data = state.clients.iter().map(|p| {
+                TrackFile { name: p.key().to_owned(), progress: p.progress, size: 69 }
+            }).collect::<Vec::<_>>();
+
+            let json = serde_json::to_string(&data).unwrap();
+            if ptx.send(json).is_err() {
+                panic!("...")
+            }
+        }
+    });
+
+    HttpResponse::Ok()
+        .append_header(("Content-Type", "text/event-stream"))
+        .append_header(("Cache-Control", "no-cache"))
+        .append_header(("Connection", "keep-alive"))
+        .streaming(prx.map(|data| {
+            Ok::<_, actix_web::Error>(data.into())
+        }))
+}
+
 fn get_default_local_ip_addr() -> Option::<IpAddr> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.connect("1.1.1.1:80").ok()?;
@@ -330,6 +398,7 @@ async fn main() -> std::io::Result<()> {
     let server = Data::new(Server {
         clients: Arc::new(DashMap::new()),
         files: Arc::new(Mutex::new(Vec::new())),
+        progress_tx: Arc::new(tokio::sync::Mutex::new(None)),
         qr_bytes: gen_qr_png_bytes(&qr).expect("Could not generate QR code image").into()
     });
 
@@ -346,5 +415,6 @@ async fn main() -> std::io::Result<()> {
             .service(upload_desktop)
             .service(index_mobile_js)
             .service(index_desktop_js)
+            .service(download_files_progress_mobile)
     }).bind((local_ip.to_string(), PORT))?.run().await
 }
