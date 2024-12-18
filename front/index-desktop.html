@@ -52,9 +52,6 @@
       button:hover {
         background: #45a049;
       }
-      #status {
-        margin-top: 18px;
-      }
       /* .status-message {
         display: flex;
         align-items: center;
@@ -202,14 +199,19 @@
       #menu-active {
         display: none;
       }
-      #status {
+      .status {
         display: flex;
+        margin-top: 18px;
         flex-direction: column;
         justify-content: center;
         align-items: center;
         gap: 18px;
       }
-      .upload_logs {
+      .logs_container {
+        display: flex;
+        gap: 20px;
+      }
+      .logs {
         font-family: "DM Sans", sans-serif;
         font-weight: 800;
         letter-spacing: 4px;
@@ -398,12 +400,18 @@
         </div>
         <div id="menu-active">drop here</div>
       </div>
-      <input type="file" id="file-input" name="files" multiple required/>
+      <input type="file" id="file-input" name="files" multiple required />
       <button type="button" id="upload-button">Upload</button>
     </form>
-    <div>
-      <div class="upload_logs">UPLOAD LOGS</div>
-      <div id="status"></div>
+    <div class="logs_container">
+      <div>
+        <div class="logs">UPLOAD LOGS</div>
+        <div id="upload_status" class="status"></div>
+      </div>
+      <div>
+        <div class="logs">DOWNLOAD LOGS</div>
+        <div id="download_status" class="status"></div>
+      </div>
     </div>
     <div id="qrcode-container">
       <span>Loading QR Code...</span>

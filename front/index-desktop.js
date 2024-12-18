@@ -8,8 +8,10 @@ function connectSSE() {
     return;
   }
 
+  let downloadFilesHash = [];
+
   console.log("Establishing SSE connection...");
-  
+
   // Create a new SSE connection
   eventSource = new EventSource("/download-files-progress-desktop");
 
@@ -18,12 +20,33 @@ function connectSSE() {
   };
 
   eventSource.onmessage = (event) => {
+    const eventData = JSON.parse(event.data);
     console.log("Received SSE message:", event.data);
-      if (event.data === 'Connection replaced') {
-          console.log('Connection replaced by the server.');
-          source.close(); // Close the current connection
-          return;
+    if (event.data === "Connection replaced") {
+      console.log("Connection replaced by the server.");
+      eventSource.close(); // Close the current connection
+      return;
+    }
+    console.log(downloadFilesHash);
+
+    if (downloadFilesHash.length == 0) {
+      eventData.map((e, i) => (downloadFilesHash[i] = e));
+    }
+
+    eventData.map((messageFile) =>
+      downloadFilesHash.map((hashFile) => {
+        if (messageFile.name == hashFile.name) {
+          hashFile.progress = messageFile.progress;
+        }
+      })
+    );
+
+    downloadFilesHash.map((e, i) => {
+      e = watchDownloadFileProgress(e);
+      if (e.progress == 100) {
+        downloadFilesHash.splice(i, 1);
       }
+    });
   };
 
   eventSource.onerror = (error) => {
@@ -75,7 +98,8 @@ document
   .getElementById("drag_and_drop-menu")
   .addEventListener("dragover", (e) => {
     e.preventDefault();
-    document.getElementById("drag_and_drop-menu").className = "drag_and_drop-menu-active";
+    document.getElementById("drag_and_drop-menu").className =
+      "drag_and_drop-menu-active";
     document.getElementById("menu").style.display = "none";
     document.getElementById("menu-active").style.display = "block";
   });
@@ -84,7 +108,8 @@ document
   .getElementById("drag_and_drop-menu")
   .addEventListener("dragend", () => {
     e.preventDefault();
-    document.getElementById("drag_and_drop-menu").className = "drag_and_drop-menu";
+    document.getElementById("drag_and_drop-menu").className =
+      "drag_and_drop-menu";
     document.getElementById("menu").style.display = "flex";
     document.getElementById("menu-active").style.display = "none";
   });
@@ -93,9 +118,10 @@ document
   .getElementById("drag_and_drop-menu")
   .addEventListener("drop", async function dropHandler(ev) {
     ev.preventDefault();
-    const statusDiv = document.getElementById("status");
+    const statusDiv = document.getElementById("upload_status");
 
-    document.getElementById("drag_and_drop-menu").className = "drag_and_drop-menu";
+    document.getElementById("drag_and_drop-menu").className =
+      "drag_and_drop-menu";
     document.getElementById("menu").style.display = "flex";
     document.getElementById("menu-active").style.display = "none";
 
@@ -109,7 +135,10 @@ document
 
     const files = Array.from(ev.dataTransfer.items);
     files.forEach((file) => {
-      const { message, fileNameSpan, messageStatusDiv } = createMessage(file.getAsFile());
+      const { message, fileNameSpan, messageStatusDiv } = createMessage(
+        file.getAsFile(),
+        "upload"
+      );
       const fullFileObject = {
         status: "idle",
         file: file.getAsFile(),
@@ -125,7 +154,7 @@ document
   .getElementById("upload-button")
   .addEventListener("click", async (e) => {
     e.preventDefault();
-    const statusDiv = document.getElementById("status");
+    const statusDiv = document.getElementById("upload_status");
 
     if (!globalFiles.length) {
       const message = document.createElement("div");
@@ -140,7 +169,10 @@ document
 
 document.getElementById("file-input").addEventListener("change", (e) => {
   Array.from(e.target.files).forEach((file) => {
-    const { message, fileNameSpan, messageStatusDiv } = createMessage(file);
+    const { message, fileNameSpan, messageStatusDiv } = createMessage(
+      file,
+      "upload"
+    );
 
     const fullFileObject = {
       status: "idle",
@@ -154,8 +186,8 @@ document.getElementById("file-input").addEventListener("change", (e) => {
   });
 });
 
-function createMessage(file) {
-  const statusDiv = document.getElementById("status");
+function createMessage(file, transmissionType) {
+  const statusDiv = document.getElementById(`${transmissionType}_status`);
   const message = document.createElement("div");
   const fileNameSpan = document.createElement("span");
   const status = document.createElement("span");
@@ -177,6 +209,36 @@ function createMessage(file) {
     fileNameSpan: fileNameSpan,
     messageStatusDiv: status,
   };
+}
+
+function watchDownloadFileProgress(downloadFileObject) {
+  console.log(downloadFileObject);
+  if (downloadFileObject.status == "success") {
+    return downloadFileObject;
+  }
+
+  if (!downloadFileObject.domCreated) {
+    const { message, fileNameSpan, messageStatusDiv } = createMessage(
+      downloadFileObject,
+      "download"
+    );
+
+    downloadFileObject.message = message;
+    downloadFileObject.fileNameSpan = fileNameSpan;
+    downloadFileObject.messageStatusDiv = messageStatusDiv;
+    downloadFileObject.domCreated = true;
+    downloadFileObject.status = "progress";
+
+    downloadFileObject.message.className = "status-message progress";
+
+    downloadFileObject.messageStatusDiv.textContent = ` ${downloadFileObject.progress}%`;
+  }
+  if (downloadFileObject.progress == 100) {
+    downloadFileObject.status = "success";
+    downloadFileObject.messageStatusDiv.textContent = `SUCCESS`;
+    downloadFileObject.message.className = "status-message success";
+  }
+  return downloadFileObject;
 }
 
 async function uploadFilesConcurrently(files, maxConcurrent = 4) {
