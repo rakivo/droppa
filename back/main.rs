@@ -73,7 +73,8 @@ pub struct TrackFile {
 pub struct ProgressSender {
     sender: watch::Sender::<u8>,
     progress: u8,
-    mobile: bool
+    mobile: bool,
+    size: usize
 }
 
 type ProgressPinger = Arc::<tokio::sync::Mutex::<Option::<mpsc::Sender::<()>>>>;
@@ -135,6 +136,7 @@ impl File {
                             println!("[ERROR] no: {name} in the clients hashmap, returning an error..");
                             return Err(actix_multipart::MultipartError::Incomplete)
                         };
+                        ps.size = size;
                         ps.progress = progress;
                         if let Err(e) = ps.sender.send(progress) {
                             eprintln!("[ERROR] failed to send progress: {e}");
@@ -197,6 +199,7 @@ async fn track_progress(rq: HttpRequest, path: web::Path::<String>, state: Data:
     state.clients.insert(file_name, ProgressSender {
         sender: tx,
         progress: 0,
+        size: 0,
         mobile: user_agent_is_mobile(user_agent)
     });
 
@@ -370,7 +373,7 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
                 }))
         }
 
-        **files_progress_sender = Some(ptx);
+        **files_progress_sender = Some(ptx)
     }
 
     let (tx, mut rx) = mpsc::channel(8);
@@ -385,7 +388,7 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
             }
 
             let data = state.clients.iter().filter(|p| p.mobile != mobile).map(|p| {
-                TrackFile { name: p.key().to_owned(), progress: p.progress, size: 69 }
+                TrackFile { name: p.key().to_owned(), progress: p.progress, size: p.size }
             }).collect::<Vec::<_>>();
 
             let json = serde_json::to_string(&data).unwrap();
