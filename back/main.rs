@@ -154,12 +154,13 @@ impl File {
     }
 }
 
-#[derive(Clone)]
 struct Server {
     files: AtomicFiles,
     qr_bytes: web::Bytes,
     clients: Arc::<Clients>,
     progress_tx: ProgressPinger,
+    mobile_files_progress_sender: Arc::<tokio::sync::Mutex::<Option::<watch::Sender::<String>>>>,
+    desktop_files_progress_sender: Arc::<tokio::sync::Mutex::<Option::<watch::Sender::<String>>>>,
 }
 
 impl Server {
@@ -340,32 +341,60 @@ async fn download_files(state: web::Data::<Server>) -> impl Responder {
         .body(zip_bytes)
 }
 
-#[get("/download-files-progress-mobile")]
-async fn download_files_progress_mobile(state: Data::<Server>) -> impl Responder {
+async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder {
     let ptx = watch::channel("[]".to_owned()).0;
-    println!("[INFO] client connected to <http://localhost:8080/download-files-progress-desktop>");
-
     let prx = WatchStream::new(ptx.subscribe());
 
-    let (tx, mut rx) = mpsc::channel(8);
+    println!{
+        "[INFO] client connected to <http://localhost:8080/download-files-progress-{device}>",
+        device = if mobile { "mobile" } else { "desktop" }
+    };
 
+    {
+        let files_progress_sender = &mut if mobile {
+            state.mobile_files_progress_sender.lock()
+        } else {
+            state.mobile_files_progress_sender.lock()
+        }.await;
+
+        if files_progress_sender.is_some() {
+            files_progress_sender.as_ref().unwrap().send("Connection replaced".to_owned()).unwrap();
+
+            **files_progress_sender = Some(ptx);
+            return HttpResponse::Ok()
+                .append_header(("Content-Type", "text/event-stream"))
+                .append_header(("Cache-Control", "no-cache"))
+                .append_header(("Connection", "keep-alive"))
+                .streaming(prx.map(|data| {
+                    Ok::<_, actix_web::Error>(format!("data: {data}\n\n").into())
+                }))
+        }
+
+        **files_progress_sender = Some(ptx);
+    }
+
+    let (tx, mut rx) = mpsc::channel(8);
     *state.progress_tx.lock().await = Some(tx);
 
+    let state = Data::clone(&state);
     actix_rt::spawn(async move {
         loop {
             if rx.try_recv().is_err() {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 continue
             }
 
-            let data = state.clients.iter().map(|p| {
+            let data = state.clients.iter().filter(|p| p.mobile != mobile).map(|p| {
                 TrackFile { name: p.key().to_owned(), progress: p.progress, size: 69 }
             }).collect::<Vec::<_>>();
 
             let json = serde_json::to_string(&data).unwrap();
-            if ptx.send(json).is_err() {
-                panic!("...")
-            }
+
+            if mobile {
+                state.mobile_files_progress_sender.lock()
+            } else {
+                state.desktop_files_progress_sender.lock()
+            }.await.as_ref().unwrap().send(json).unwrap()
         }
     });
 
@@ -374,9 +403,112 @@ async fn download_files_progress_mobile(state: Data::<Server>) -> impl Responder
         .append_header(("Cache-Control", "no-cache"))
         .append_header(("Connection", "keep-alive"))
         .streaming(prx.map(|data| {
-            Ok::<_, actix_web::Error>(data.into())
+            Ok::<_, actix_web::Error>(format!("data: {data}\n\n").into())
         }))
 }
+
+#[get("/download-files-progress-mobile")]
+async fn download_files_progress_mobile(state: Data::<Server>) -> impl Responder {
+    stream_progress(state, true).await
+}
+
+// #[get("/download-files-progress-mobile")]
+// async fn download_files_progress_mobile(state: Data::<Server>) -> impl Responder {
+//     let ptx = watch::channel("[]".to_owned()).0;
+//     println!("[INFO] client connected to <http://localhost:8080/download-files-progress-desktop>");
+
+//     let prx = WatchStream::new(ptx.subscribe());
+
+//     let (tx, mut rx) = mpsc::channel(8);
+
+//     *state.progress_tx.lock().await = Some(tx);
+
+//     actix_rt::spawn(async move {
+//         loop {
+//             if rx.try_recv().is_err() {
+//                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+//                 continue
+//             }
+
+//             let data = state.clients.iter().map(|p| {
+//                 TrackFile { name: p.key().to_owned(), progress: p.progress, size: 69 }
+//             }).collect::<Vec::<_>>();
+
+//             let json = serde_json::to_string(&data).unwrap();
+//             if ptx.send(json).is_err() {
+//                 panic!("...")
+//             }
+//         }
+//     });
+
+//     HttpResponse::Ok()
+//         .append_header(("Content-Type", "text/event-stream"))
+//         .append_header(("Cache-Control", "no-cache"))
+//         .append_header(("Connection", "keep-alive"))
+//         .streaming(prx.map(|data| {
+//             Ok::<_, actix_web::Error>(data.into())
+//         }))
+// }
+
+#[get("/download-files-progress-desktop")]
+async fn download_files_progress_desktop(state: Data::<Server>) -> impl Responder {
+    stream_progress(state, false).await
+}
+
+// #[get("/download-files-progress-desktop")]
+// async fn download_files_progress_desktop(state: Data::<Server>) -> impl Responder {
+//     let ptx = watch::channel("[]".to_owned()).0;
+//     let prx = WatchStream::new(ptx.subscribe());
+
+//     let mobile = false;
+
+//     println!{
+//         "[INFO] client connected to <http://localhost:8080/download-files-progress-{device}>",
+//         device = if mobile { "mobile" } else { "desktop" }
+//     };
+
+//     let files_progress_sender = &mut state.desktop_files_progress_sender.lock().await;
+//     if files_progress_sender.is_some() {
+//         **files_progress_sender = Some(ptx);
+//         return HttpResponse::Ok()
+//             .append_header(("Content-Type", "text/event-stream"))
+//             .append_header(("Cache-Control", "no-cache"))
+//             .append_header(("Connection", "keep-alive"))
+//             .streaming(prx.map(|data| {
+//                 Ok::<_, actix_web::Error>(format!("data: {data}\n\n").into())
+//             }))
+//     }
+
+//     **files_progress_sender = Some(ptx);
+
+//     let (tx, mut rx) = mpsc::channel(8);
+//     *state.progress_tx.lock().await = Some(tx);
+
+//     let state = Data::clone(&state);
+//     actix_rt::spawn(async move {
+//         loop {
+//             if rx.try_recv().is_err() {
+//                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+//                 continue
+//             }
+
+//             let data = state.clients.iter().filter(|p| p.mobile != mobile).map(|p| {
+//                 TrackFile { name: p.key().to_owned(), progress: p.progress, size: 69 }
+//             }).collect::<Vec::<_>>();
+
+//             let json = serde_json::to_string(&data).unwrap();
+//             state.desktop_files_progress_sender.lock().await.as_ref().unwrap().send(json).unwrap();
+//         }
+//     });
+
+//     HttpResponse::Ok()
+//         .append_header(("Content-Type", "text/event-stream"))
+//         .append_header(("Cache-Control", "no-cache"))
+//         .append_header(("Connection", "keep-alive"))
+//         .streaming(prx.map(|data| {
+//             Ok::<_, actix_web::Error>(format!("data: {data}\n\n").into())
+//         }))
+// }
 
 fn get_default_local_ip_addr() -> Option::<IpAddr> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -395,10 +527,12 @@ async fn main() -> std::io::Result<()> {
     let local_addr = format!("http://{local_ip}:{PORT}");
     let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode URL to QR code");
 
-    let server = Data::new(Server {
+    let server = Data::new(Server {        
         clients: Arc::new(DashMap::new()),
         files: Arc::new(Mutex::new(Vec::new())),
         progress_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        mobile_files_progress_sender: Arc::new(tokio::sync::Mutex::new(None)),
+        desktop_files_progress_sender: Arc::new(tokio::sync::Mutex::new(None)),
         qr_bytes: gen_qr_png_bytes(&qr).expect("Could not generate QR code image").into()
     });
 
@@ -416,5 +550,6 @@ async fn main() -> std::io::Result<()> {
             .service(index_mobile_js)
             .service(index_desktop_js)
             .service(download_files_progress_mobile)
+            .service(download_files_progress_desktop)
     }).bind((local_ip.to_string(), PORT))?.run().await
 }

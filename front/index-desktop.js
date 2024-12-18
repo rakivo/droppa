@@ -1,6 +1,51 @@
 let globalFiles = [];
 
+let eventSource = null;
+
+function connectSSE() {
+  if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
+    console.log("SSE connection already active");
+    return;
+  }
+
+  console.log("Establishing SSE connection...");
+  
+  // Create a new SSE connection
+  eventSource = new EventSource("/download-files-progress-desktop");
+
+  eventSource.onopen = () => {
+    console.log("SSE connection established");
+  };
+
+  eventSource.onmessage = (event) => {
+    console.log("Received SSE message:", event.data);
+      if (event.data === 'Connection replaced') {
+          console.log('Connection replaced by the server.');
+          source.close(); // Close the current connection
+          return;
+      }
+  };
+
+  eventSource.onerror = (error) => {
+    console.error("SSE connection error:", error);
+    // Close the connection to avoid endless reconnect attempts
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+  };
+}
+
+window.addEventListener("beforeunload", () => {
+  if (eventSource) {
+    console.log("Closing SSE connection on unload");
+    eventSource.close();
+  }
+});
+
 window.addEventListener("load", () => {
+  connectSSE();
+
   const qrcodeContainer = document.getElementById("qrcode-container");
 
   fetch("/qr.png")
