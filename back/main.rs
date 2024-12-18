@@ -70,7 +70,7 @@ pub struct TrackFile {
     pub progress: u8
 }
 
-pub struct ProgressSender {
+pub struct Client {
     sender: watch::Sender::<u8>,
     progress: u8,
     mobile: bool,
@@ -78,8 +78,9 @@ pub struct ProgressSender {
 }
 
 type ProgressPinger = Arc::<tokio::sync::Mutex::<Option::<mpsc::Sender::<()>>>>;
+type ProgressSender = Arc::<tokio::sync::Mutex::<Option::<watch::Sender::<String>>>>;
 
-type Clients = DashMap::<String, ProgressSender>;
+type Clients = DashMap::<String, Client>;
 
 pub struct File {
     pub size: usize,
@@ -141,9 +142,16 @@ impl File {
                         if let Err(e) = ps.sender.send(progress) {
                             eprintln!("[ERROR] failed to send progress: {e}");
                         }
-                        if let Ok(pp) = pp.try_lock() {
-                            if let Some(pp) = pp.as_ref() {
+                        // if progress == 100 we need to send "final" `100%` message even if it the mutex is locked right now
+                        if progress == 100 {
+                            if let Some(pp) = pp.lock().await.as_ref() {
                                 _ = pp.send(()).await
+                            }
+                        } else {
+                            if let Ok(pp) = pp.try_lock() {
+                                if let Some(pp) = pp.as_ref() {
+                                    _ = pp.send(()).await
+                                }
                             }
                         }
                     }
@@ -161,8 +169,8 @@ struct Server {
     qr_bytes: web::Bytes,
     clients: Arc::<Clients>,
     progress_tx: ProgressPinger,
-    mobile_files_progress_sender: Arc::<tokio::sync::Mutex::<Option::<watch::Sender::<String>>>>,
-    desktop_files_progress_sender: Arc::<tokio::sync::Mutex::<Option::<watch::Sender::<String>>>>,
+    mobile_files_progress_sender: ProgressSender,
+    desktop_files_progress_sender: ProgressSender
 }
 
 impl Server {
@@ -196,7 +204,7 @@ async fn track_progress(rq: HttpRequest, path: web::Path::<String>, state: Data:
     
     let rx = WatchStream::new(tx.subscribe());
     println!("[INFO] inserted: {file_name} into the clients hashmap");
-    state.clients.insert(file_name, ProgressSender {
+    state.clients.insert(file_name, Client {
         sender: tx,
         progress: 0,
         size: 0,
@@ -397,7 +405,9 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
                 state.mobile_files_progress_sender.lock()
             } else {
                 state.desktop_files_progress_sender.lock()
-            }.await.as_ref().unwrap().send(json).unwrap()
+            }.await.as_ref().unwrap().send(json).unwrap();
+
+            state.clients.retain(|_, v| v.progress == 100);
         }
     });
 
@@ -447,6 +457,7 @@ async fn main() -> std::io::Result<()> {
     });
 
     println!("[INFO] serving at: <http://{local_ip}:{PORT}>");
+
     HttpServer::new(move || {
         App::new()
             .app_data(Data::clone(&server))
