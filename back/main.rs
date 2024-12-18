@@ -407,7 +407,7 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
                 state.desktop_files_progress_sender.lock()
             }.await.as_ref().unwrap().send(json).unwrap();
 
-            state.clients.retain(|_, v| v.progress == 100);
+            // state.clients.retain(|_, v| v.progress == 100);
         }
     });
 
