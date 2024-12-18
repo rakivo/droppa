@@ -141,7 +141,7 @@ impl File {
                         }
                         if let Ok(pp) = pp.try_lock() {
                             if let Some(pp) = pp.as_ref() {
-                                pp.send(()).await.unwrap()
+                                _ = pp.send(()).await
                             }
                         }
                     }
@@ -354,7 +354,7 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
         let files_progress_sender = &mut if mobile {
             state.mobile_files_progress_sender.lock()
         } else {
-            state.mobile_files_progress_sender.lock()
+            state.desktop_files_progress_sender.lock()
         }.await;
 
         if files_progress_sender.is_some() {
@@ -412,103 +412,10 @@ async fn download_files_progress_mobile(state: Data::<Server>) -> impl Responder
     stream_progress(state, true).await
 }
 
-// #[get("/download-files-progress-mobile")]
-// async fn download_files_progress_mobile(state: Data::<Server>) -> impl Responder {
-//     let ptx = watch::channel("[]".to_owned()).0;
-//     println!("[INFO] client connected to <http://localhost:8080/download-files-progress-desktop>");
-
-//     let prx = WatchStream::new(ptx.subscribe());
-
-//     let (tx, mut rx) = mpsc::channel(8);
-
-//     *state.progress_tx.lock().await = Some(tx);
-
-//     actix_rt::spawn(async move {
-//         loop {
-//             if rx.try_recv().is_err() {
-//                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-//                 continue
-//             }
-
-//             let data = state.clients.iter().map(|p| {
-//                 TrackFile { name: p.key().to_owned(), progress: p.progress, size: 69 }
-//             }).collect::<Vec::<_>>();
-
-//             let json = serde_json::to_string(&data).unwrap();
-//             if ptx.send(json).is_err() {
-//                 panic!("...")
-//             }
-//         }
-//     });
-
-//     HttpResponse::Ok()
-//         .append_header(("Content-Type", "text/event-stream"))
-//         .append_header(("Cache-Control", "no-cache"))
-//         .append_header(("Connection", "keep-alive"))
-//         .streaming(prx.map(|data| {
-//             Ok::<_, actix_web::Error>(data.into())
-//         }))
-// }
-
 #[get("/download-files-progress-desktop")]
 async fn download_files_progress_desktop(state: Data::<Server>) -> impl Responder {
     stream_progress(state, false).await
 }
-
-// #[get("/download-files-progress-desktop")]
-// async fn download_files_progress_desktop(state: Data::<Server>) -> impl Responder {
-//     let ptx = watch::channel("[]".to_owned()).0;
-//     let prx = WatchStream::new(ptx.subscribe());
-
-//     let mobile = false;
-
-//     println!{
-//         "[INFO] client connected to <http://localhost:8080/download-files-progress-{device}>",
-//         device = if mobile { "mobile" } else { "desktop" }
-//     };
-
-//     let files_progress_sender = &mut state.desktop_files_progress_sender.lock().await;
-//     if files_progress_sender.is_some() {
-//         **files_progress_sender = Some(ptx);
-//         return HttpResponse::Ok()
-//             .append_header(("Content-Type", "text/event-stream"))
-//             .append_header(("Cache-Control", "no-cache"))
-//             .append_header(("Connection", "keep-alive"))
-//             .streaming(prx.map(|data| {
-//                 Ok::<_, actix_web::Error>(format!("data: {data}\n\n").into())
-//             }))
-//     }
-
-//     **files_progress_sender = Some(ptx);
-
-//     let (tx, mut rx) = mpsc::channel(8);
-//     *state.progress_tx.lock().await = Some(tx);
-
-//     let state = Data::clone(&state);
-//     actix_rt::spawn(async move {
-//         loop {
-//             if rx.try_recv().is_err() {
-//                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-//                 continue
-//             }
-
-//             let data = state.clients.iter().filter(|p| p.mobile != mobile).map(|p| {
-//                 TrackFile { name: p.key().to_owned(), progress: p.progress, size: 69 }
-//             }).collect::<Vec::<_>>();
-
-//             let json = serde_json::to_string(&data).unwrap();
-//             state.desktop_files_progress_sender.lock().await.as_ref().unwrap().send(json).unwrap();
-//         }
-//     });
-
-//     HttpResponse::Ok()
-//         .append_header(("Content-Type", "text/event-stream"))
-//         .append_header(("Cache-Control", "no-cache"))
-//         .append_header(("Connection", "keep-alive"))
-//         .streaming(prx.map(|data| {
-//             Ok::<_, actix_web::Error>(format!("data: {data}\n\n").into())
-//         }))
-// }
 
 fn get_default_local_ip_addr() -> Option::<IpAddr> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
