@@ -142,16 +142,9 @@ impl File {
                         if let Err(e) = ps.sender.send(progress) {
                             eprintln!("[ERROR] failed to send progress: {e}");
                         }
-                        // if progress == 100 we need to send "final" `100%` message even if it the mutex is locked right now
-                        if progress == 100 {
-                            if let Some(pp) = pp.lock().await.as_ref() {
+                        if let Ok(pp) = pp.try_lock() {
+                            if let Some(pp) = pp.as_ref() {
                                 _ = pp.send(()).await
-                            }
-                        } else {
-                            if let Ok(pp) = pp.try_lock() {
-                                if let Some(pp) = pp.as_ref() {
-                                    _ = pp.send(()).await
-                                }
                             }
                         }
                     }
