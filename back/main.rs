@@ -6,9 +6,9 @@ use std::io::{Cursor, Write, BufWriter};
 use serde::Serialize;
 use dashmap::DashMap;
 use actix_web::rt as actix_rt;
+use tokio::sync::{mpsc, watch};
 use actix_multipart::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
-use tokio::sync::{mpsc, watch};
 use actix_web::{get, post, HttpRequest};
 use tokio_stream::wrappers::WatchStream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -74,7 +74,9 @@ pub struct Client {
     sender: watch::Sender::<u8>,
     progress: u8,
     mobile: bool,
-    size: usize
+    size: usize,
+    final_sent: bool,
+    all_bytes_copied: bool
 }
 
 type ProgressPinger = Arc::<tokio::sync::Mutex::<Option::<mpsc::Sender::<()>>>>;
@@ -149,7 +151,11 @@ impl File {
                         }
                     }
                     Ok((bytes, name, clients, pp))
-                }).await.map_err(|_| "error reading file field")?.0;
+                }).await.map(|res| {
+                    if let Some(mut ps) = clients.get_mut(&name) {
+                        ps.all_bytes_copied = true
+                    } res
+                }).map_err(|_| "error reading file field")?.0;
             }
         }
 
@@ -201,7 +207,9 @@ async fn track_progress(rq: HttpRequest, path: web::Path::<String>, state: Data:
         sender: tx,
         progress: 0,
         size: 0,
-        mobile: user_agent_is_mobile(user_agent)
+        mobile: user_agent_is_mobile(user_agent),
+        final_sent: false,
+        all_bytes_copied: false,
     });
 
     HttpResponse::Ok()
@@ -384,11 +392,35 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
     actix_rt::spawn(async move {
         loop {
             if rx.try_recv().is_err() {
+                let data = state.clients.iter_mut().filter_map(|mut c| {
+                    if c.progress == 100 && !c.final_sent {
+                        c.final_sent = true;
+                        Some(TrackFile {
+                            name: c.key().to_owned(),
+                            progress: c.progress,
+                            size: c.size
+                        })
+                    } else {
+                        None
+                    }
+                }).collect::<Vec::<_>>();
+
+                if !data.is_empty() {
+                    let json = serde_json::to_string(&data).unwrap();
+
+                    if mobile {
+                        state.mobile_files_progress_sender.lock()
+                    } else {
+                        state.desktop_files_progress_sender.lock()
+                    }.await.as_ref().unwrap().send(json).unwrap();
+                }
+
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 continue
             }
 
-            let data = state.clients.iter().filter(|p| p.mobile != mobile).map(|p| {
+            let data = state.clients.iter_mut().filter(|p| p.mobile != mobile).map(|mut p| {
+                p.final_sent = p.progress == 100;
                 TrackFile { name: p.key().to_owned(), progress: p.progress, size: p.size }
             }).collect::<Vec::<_>>();
 
@@ -400,7 +432,7 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
                 state.desktop_files_progress_sender.lock()
             }.await.as_ref().unwrap().send(json).unwrap();
 
-            // state.clients.retain(|_, v| v.progress == 100);
+            tokio::time::sleep(tokio::time::Duration::from_millis(250)).await
         }
     });
 
