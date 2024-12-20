@@ -1,5 +1,7 @@
 let globalFiles = [];
 
+let downloadFiles = [];
+
 let eventSource = null;
 
 function connectSSE() {
@@ -7,8 +9,6 @@ function connectSSE() {
     console.log("SSE connection already active");
     return;
   }
-
-  let downloadFilesHash = [];
 
   console.log("Establishing SSE connection...");
 
@@ -27,24 +27,26 @@ function connectSSE() {
       eventSource.close(); // Close the current connection
       return;
     }
-    console.log(downloadFilesHash);
+    console.log(downloadFiles);
 
-    if (downloadFilesHash.length == 0) {
-      eventData.map((e, i) => (downloadFilesHash[i] = e));
+    console.log(eventData);
+
+    if (downloadFiles.length == 0) {
+      eventData.map((e, i) => (downloadFiles[i] = e));
     }
 
     eventData.map((messageFile) =>
-      downloadFilesHash.map((hashFile) => {
+      downloadFiles.map((hashFile) => {
         if (messageFile.name == hashFile.name) {
           hashFile.progress = messageFile.progress;
         }
       })
     );
 
-    downloadFilesHash.map((e, i) => {
+    downloadFiles.map((e, i) => {
       e = watchDownloadFileProgress(e);
       if (e.progress == 100) {
-        downloadFilesHash.splice(i, 1);
+        downloadFiles.splice(i, 1);
       }
     });
   };
@@ -55,6 +57,7 @@ function connectSSE() {
     if (eventSource) {
       eventSource.close();
       eventSource = null;
+      connectSSE();
     }
   };
 }
@@ -213,10 +216,9 @@ function createMessage(file, transmissionType) {
 
 function watchDownloadFileProgress(downloadFileObject) {
   console.log(downloadFileObject);
-  if (downloadFileObject.status == "success") {
+  /*   if (downloadFileObject.status == "success") {
     return downloadFileObject;
-  }
-
+  } */
   if (!downloadFileObject.domCreated) {
     const { message, fileNameSpan, messageStatusDiv } = createMessage(
       downloadFileObject,
@@ -233,11 +235,13 @@ function watchDownloadFileProgress(downloadFileObject) {
 
     downloadFileObject.messageStatusDiv.textContent = ` ${downloadFileObject.progress}%`;
   }
+
   if (downloadFileObject.progress == 100) {
     downloadFileObject.status = "success";
     downloadFileObject.messageStatusDiv.textContent = `SUCCESS`;
     downloadFileObject.message.className = "status-message success";
   }
+  console.log(downloadFileObject);
   return downloadFileObject;
 }
 
