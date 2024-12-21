@@ -57,6 +57,7 @@ function connectSSE() {
     if (eventSource) {
       eventSource.close();
       eventSource = null;
+      setTimeout(() => (connectSSE()), 2500);
     }
   };
 }

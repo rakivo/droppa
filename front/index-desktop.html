@@ -19,7 +19,7 @@
     <style>
       body {
         font-family: Arial, sans-serif;
-        background-color: #f4f4f9;
+        background-color: #ffffff;
         color: #333;
         margin: 0;
         padding: 20px;
@@ -52,18 +52,6 @@
       button:hover {
         background: #45a049;
       }
-      /* .status-message {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-family: "Source Code Pro", monospace;
-        font-size: 25px;
-        width: 400px;
-        height: 40px;
-        color: #000;
-        border-radius: 6px;
-        gap: 5px;
-      } */
       .file_name {
         width: 200px;
         text-overflow: ellipsis;
@@ -124,11 +112,12 @@
         font-size: 16px;
         font-family: "DM Sans", sans-serif;
         font-weight: 500;
+        margin-top: 10px;
         color: black;
       }
       #toggle_mode-container {
         margin: 0;
-        margin-top: 100px;
+        margin-top: 40px;
         width: 280px;
         height: 120px;
         border-radius: 60px;
@@ -409,14 +398,14 @@
     <form id="upload-form" onsubmit="(e) => e.preventDefault()">
       <div id="drag_and_drop-menu" class="drag_and_drop-menu">
         <div id="menu">
-          <span>drag and drop</span>
+          <span>drag & drop</span>
           <div class="line"></div>
           <span id="browse-files">browse files</span>
         </div>
         <div id="menu-active">drop here</div>
       </div>
       <input type="file" id="file-input" name="files" multiple required />
-      <button type="button" id="upload-button">Upload</button>
+      <button type="button" id="upload-button">upload</button>
     </form>
     <div class="logs_container">
       <div>
