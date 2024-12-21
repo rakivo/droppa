@@ -6,12 +6,12 @@ use std::io::{Cursor, Write, BufWriter};
 use serde::Serialize;
 use dashmap::DashMap;
 use actix_web::rt as actix_rt;
-use actix_multipart::Multipart;
 use qrcodegen::{QrCode, QrCodeEcc};
 use tokio::sync::{mpsc, watch};
 use actix_web::{get, post, HttpRequest};
 use tokio_stream::wrappers::WatchStream;
 use futures_util::{StreamExt, TryStreamExt};
+use actix_multipart::{Multipart, MultipartError};
 use zip::{ZipWriter, CompressionMethod, write::SimpleFileOptions};
 use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Data}};
 
@@ -74,7 +74,7 @@ pub struct Client {
     sender: watch::Sender::<u8>,
     progress: u8,
     mobile: bool,
-    size: usize
+    size: usize,
 }
 
 type ProgressPinger = Arc::<tokio::sync::Mutex::<Option::<mpsc::Sender::<()>>>>;
@@ -133,14 +133,16 @@ impl File {
                     bytes.extend_from_slice(&chunk);
                     let progress = (bytes.len() * 100 / size).min(100) as u8;
                     if progress % 5 == 0 {
-                        let Some(mut ps) = clients.get_mut(name) else {
-                            println!("[ERROR] no: {name} in the clients hashmap, returning an error..");
-                            return Err(actix_multipart::MultipartError::Incomplete)
-                        };
-                        ps.size = size;
-                        ps.progress = progress;
-                        if let Err(e) = ps.sender.send(progress) {
-                            eprintln!("[ERROR] failed to send progress: {e}");
+                        {
+                            let Some(mut ps) = clients.get_mut(name) else {
+                                println!("[ERROR] no: {name} in the clients hashmap, returning an error..");
+                                return Err(MultipartError::Incomplete)
+                            };
+                            ps.size = size;
+                            ps.progress = progress;
+                            if let Err(e) = ps.sender.send(progress) {
+                                eprintln!("[ERROR] failed to send progress: {e}");
+                            }
                         }
                         if let Ok(pp) = pp.try_lock() {
                             if let Some(pp) = pp.as_ref() {
@@ -380,6 +382,20 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
     let (tx, mut rx) = mpsc::channel(8);
     *state.progress_tx.lock().await = Some(tx);
 
+    let data = state.clients.iter().filter(|p| p.mobile != mobile).map(|p| {
+        TrackFile { name: p.key().to_owned(), progress: 0, size: p.size }
+    }).collect::<Vec::<_>>();
+
+    let json = serde_json::to_string(&data).unwrap();
+
+    if let Err(e) = if mobile {
+        state.mobile_files_progress_sender.lock()
+    } else {
+        state.desktop_files_progress_sender.lock()
+    }.await.as_ref().unwrap().send(json) {
+        eprintln!("[FATAL] could not send JSON: {e}")
+    }
+
     let state = Data::clone(&state);
     actix_rt::spawn(async move {
         loop {
@@ -394,13 +410,13 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
 
             let json = serde_json::to_string(&data).unwrap();
 
-            if mobile {
+            if let Err(e) = if mobile {
                 state.mobile_files_progress_sender.lock()
             } else {
                 state.desktop_files_progress_sender.lock()
-            }.await.as_ref().unwrap().send(json).unwrap();
-
-            // state.clients.retain(|_, v| v.progress == 100);
+            }.await.as_ref().unwrap().send(json) {
+                eprintln!("[FATAL] could not send JSON: {e}")
+            }
         }
     });
 

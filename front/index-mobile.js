@@ -68,7 +68,7 @@ document
       return;
     }
 
-    await uploadFilesConcurrently(globalFiles, 4);
+    await uploadFilesConcurrently(globalFiles);
   });
 
 document.getElementById("file-input").addEventListener("change", (e) => {

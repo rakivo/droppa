@@ -1,6 +1,6 @@
 let globalFiles = [];
 
-let downloadFiles = [];
+let downloadFiles = new Map;
 
 let eventSource = null;
 
@@ -12,7 +12,6 @@ function connectSSE() {
 
   console.log("Establishing SSE connection...");
 
-  // Create a new SSE connection
   eventSource = new EventSource("/download-files-progress-desktop");
 
   eventSource.onopen = () => {
@@ -23,30 +22,26 @@ function connectSSE() {
     console.log("Received SSE message:", event.data);
     if (event.data === "Connection replaced") {
       console.log("Connection replaced by the server.");
-      eventSource.close(); // Close the current connection
+      eventSource.close();
       return;
     }
-    const eventData = JSON.parse(event.data);
-    console.log(downloadFiles);
 
+    const eventData = JSON.parse(event.data);
+
+    console.log(downloadFiles);
     console.log(eventData);
 
-    if (downloadFiles.length == 0) {
-      eventData.map((e, i) => (downloadFiles[i] = e));
-    }
+    eventData.forEach((messageFile) => {
+      if (!downloadFiles.has(messageFile.name)) {
+        downloadFiles.set(messageFile.name, messageFile);
+      }
+    });
 
-    eventData.map((messageFile) =>
-      downloadFiles.map((hashFile) => {
-        if (messageFile.name == hashFile.name) {
-          hashFile.progress = messageFile.progress;
-        }
-      })
-    );
-
-    downloadFiles.map((e, i) => {
-      e = watchDownloadFileProgress(e);
-      if (e.progress == 100) {
-        downloadFiles.splice(i, 1);
+    eventData.forEach((messageFile) => {
+      if (downloadFiles.has(messageFile.name)) {
+        const hashFile = downloadFiles.get(messageFile.name);
+        hashFile.progress = messageFile.progress;
+        watchDownloadFileProgress(hashFile);
       }
     });
   };
