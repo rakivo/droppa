@@ -20,13 +20,13 @@ function connectSSE() {
   };
 
   eventSource.onmessage = (event) => {
-    const eventData = JSON.parse(event.data);
     console.log("Received SSE message:", event.data);
     if (event.data === "Connection replaced") {
       console.log("Connection replaced by the server.");
       eventSource.close(); // Close the current connection
       return;
     }
+    const eventData = JSON.parse(event.data);
     console.log(downloadFiles);
 
     console.log(eventData);
@@ -57,7 +57,6 @@ function connectSSE() {
     if (eventSource) {
       eventSource.close();
       eventSource = null;
-      connectSSE();
     }
   };
 }
@@ -83,9 +82,12 @@ window.addEventListener("load", () => {
     })
     .then((blob) => {
       const img = document.createElement("img");
+      const span = document.createElement("span");
+      span.textContent = "QR code for your phone";
       img.src = URL.createObjectURL(blob);
       qrcodeContainer.innerHTML = "";
       qrcodeContainer.appendChild(img);
+      qrcodeContainer.appendChild(span);
     })
     .catch((error) => {
       qrcodeContainer.innerHTML = "<span>Error loading QR Code</span>";
@@ -232,9 +234,8 @@ function watchDownloadFileProgress(downloadFileObject) {
     downloadFileObject.status = "progress";
 
     downloadFileObject.message.className = "status-message progress";
-
-    downloadFileObject.messageStatusDiv.textContent = ` ${downloadFileObject.progress}%`;
   }
+  downloadFileObject.messageStatusDiv.textContent = ` ${downloadFileObject.progress}%`;
 
   if (downloadFileObject.progress == 100) {
     downloadFileObject.status = "success";
