@@ -90,7 +90,7 @@ document.getElementById("file-input").addEventListener("change", (e) => {
 document
   .getElementById("download-button")
   .addEventListener("click", async (e) => {
-    fetch('/download-files')
+    fetch('/download-files-mobile')
       .then(response => {
         if (!response.ok) {
           throw new Error('Failed to download ZIP file');

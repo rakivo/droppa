@@ -306,7 +306,7 @@ async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl 
     HttpResponse::Ok().finish()
 }
 
-#[get("/download-files")]
+#[get("/download-files-mobile")]
 async fn download_files(state: web::Data::<Server>) -> impl Responder {
     println!("[INFO] download files requested, zipping them up..");
 
