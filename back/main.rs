@@ -14,6 +14,7 @@ use tokio_stream::wrappers::WatchStream;
 use futures_util::{StreamExt, TryStreamExt};
 use actix_multipart::{Multipart, MultipartError};
 use zip::{ZipWriter, CompressionMethod, write::SimpleFileOptions};
+use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use tokio::sync::{mpsc, watch, Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Data}};
 
@@ -95,7 +96,7 @@ impl File {
         let mut name = String::new();
         while let Some(Ok(field)) = multipart.next().await {
             if field.name() == "size" {
-                #[cfg(debug_assertions)] println!("processing `size` field...");
+                println!("[INFO] processing `size` field...");
 
                 let buf = field.try_fold(String::new(), |mut acc, chunk| async move {
                     acc.push_str(std::str::from_utf8(&chunk).unwrap());
@@ -104,24 +105,27 @@ impl File {
 
                 size = buf.parse::<usize>().ok();
                 if size.is_none() {
+                    println!("[FATAL] invalid size field: {buf}");
                     return Err("invalid size field")
                 }
 
                 let size = unsafe { size.unwrap_unchecked() };
                 if bytes.try_reserve_exact(size / std::mem::size_of::<u8>()).is_err() {
+                    println!("[FATAL] could not reserve memory: {}", size / std::mem::size_of::<u8>());
                     return Err("could not reserve memory")
                 }
 
-                #[cfg(debug_assertions)] println!("file size: {size}");
+                println!("[INFO] parsed file size: {size}");
 
                 if size > SIZE_LIMIT {
-                    #[cfg(debug_assertions)] println!("file size exceeds limit, returning bad request..");
+                    #[cfg(feature = "dbg")] println!("file size exceeds limit, returning bad request..");
                     return Err("file size exceeds limit, returning bad request..")
                 }
             } else {
-                #[cfg(debug_assertions)] println!("processing `file` field...");
+                println!("[INFO] processing `file` field...");
 
                 let Some(size) = size else {
+                    println!("`size` field must go first, not the `file` one");
                     return Err("`size` field must go first, not the `file` one")
                 };
 
@@ -129,10 +133,13 @@ impl File {
                     .get_filename()
                     .map(|name_| name = name_.to_owned());
 
+                println!("[INFO {name}] size: {size}");
+
                 bytes = field.try_fold((bytes, &name, &clients, &pp), |(mut bytes, name, clients, pp), chunk| async move {
                     bytes.extend_from_slice(&chunk);
                     let progress = (bytes.len() * 100 / size).min(100) as u8;
                     if progress % 5 == 0 {
+                        #[cfg(feature = "dbg")] println!("[INFO {name}] copying chunk..");
                         {
                             let Some(mut ps) = clients.get_mut(name) else {
                                 println!("[ERROR] no: {name} in the clients hashmap, returning an error..");
@@ -144,10 +151,15 @@ impl File {
                                 eprintln!("[ERROR] failed to send progress: {e}");
                             }
                         }
+                        #[cfg(feature = "dbg")] println!("[INFO {name}] copied chunk, trying to lock the pinger..");
                         if let Ok(pp) = pp.try_lock() {
                             if let Some(pp) = pp.as_ref() {
-                                _ = pp.send(()).await
+                                if pp.try_send(()).is_ok() {
+                                    #[cfg(feature = "dbg")] println!("[INFO {name}] pinged successfully..");
+                                }
                             }
+                        } else {
+                            #[cfg(feature = "dbg")] println!("[INFO {name}] lock failed..");
                         }
                     }
                     Ok((bytes, name, clients, pp))
@@ -282,8 +294,8 @@ async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl 
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
 
-    #[cfg(debug_assertions)] let mut name = name;
-    #[cfg(debug_assertions)] { name = name + ".test" }
+    #[cfg(feature = "dbg")] let mut name = name;
+    #[cfg(feature = "dbg")] { name = name + ".test" }
 
     if let Err(e) = actix_rt::task::spawn_blocking(move || {
         let file = match fs::File::create(&name) {
@@ -389,7 +401,7 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
     actix_rt::spawn(async move {
         loop {
             if rx.try_recv().is_err() {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                tokio_sleep(TokioDuration::from_millis(150)).await;
                 continue
             }
 
@@ -398,7 +410,8 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
             }).collect::<Vec::<_>>();
 
             let json = serde_json::to_string(&data).unwrap();
-            state.sender_send(json, mobile).await
+            state.sender_send(json, mobile).await;
+            tokio_sleep(TokioDuration::from_millis(100)).await;
         }
     });
 
