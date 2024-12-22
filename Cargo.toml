@@ -8,16 +8,16 @@ name = "droppa"
 path = "back/main.rs"
 
 [dependencies]
-paste           = { version = "=1.0.15"  default-features = false                         }
-qrcodegen       = { version = "=1.8.0"   default-features = false                         }
-serde_json      = { version = "=1.0.133" default-features = false                         }
-actix-files     = { version = "=0.6.6"   default-features = false                         }
-env_logger      = { version = "=0.11.5", default-features = false                         }
-futures-util    = { version = "=0.3.31", default-features = false                         }
-actix-multipart = { version = "=0.5.0",  default-features = false                         }
-actix-web       = { version = "=4.9.0",  default-features = false, features = ["macros"]  }
-zip             = { version = "=2.2.1",  default-features = false, features = ["deflate"] }
-tokio-stream    = { version = "=0.1.17",                           features = ["sync"]    }
-tokio           = { version = "=1.42.0",                           features = ["sync"]    }
-serde           = { version = "=1.0.216",                          features = ["derive"]  }
-dashmap         = { version = "=6.1.0",                            features = ["inline"]  }
+paste           = { version = "=1.0.15",  default-features = false                         }
+qrcodegen       = { version = "=1.8.0",   default-features = false                         }
+serde_json      = { version = "=1.0.133", default-features = false                         }
+actix-files     = { version = "=0.6.6",   default-features = false                         }
+env_logger      = { version = "=0.11.5",  default-features = false                         }
+futures-util    = { version = "=0.3.31",  default-features = false                         }
+actix-multipart = { version = "=0.5.0",   default-features = false                         }
+actix-web       = { version = "=4.9.0",   default-features = false, features = ["macros"]  }
+zip             = { version = "=2.2.1",   default-features = false, features = ["deflate"] }
+tokio-stream    = { version = "=0.1.17",                           features = ["sync"]     }
+tokio           = { version = "=1.42.0",                           features = ["sync"]     }
+serde           = { version = "=1.0.216",                          features = ["derive"]   }
+dashmap         = { version = "=6.1.0",                            features = ["inline"]   }

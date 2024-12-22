@@ -1,4 +1,5 @@
 use std::fs;
+use std::future::Future;
 use std::net::{IpAddr, UdpSocket};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::io::{Cursor, Write, BufWriter};
@@ -31,8 +32,8 @@ macro_rules! atomic_type {
 
 macro_rules! lock_fn {
     ($($field: tt), *) => { $(paste::paste! {
-        #[inline]
         #[track_caller]
+        #[inline(always)]
         fn [<lock_ $field>](&self) -> MutexGuard::<[<$field:camel>]> {
             self.$field.lock().unwrap()
         }
@@ -168,6 +169,22 @@ struct Server {
 }
 
 impl Server {
+    #[inline(always)]
+    fn lock_sender(&self, mobile: bool) -> impl Future::<Output = tokio::sync::MutexGuard::<Option::<watch::Sender::<String>>>> {
+        if mobile {
+            self.mobile_files_progress_sender.lock()
+        } else {
+            self.desktop_files_progress_sender.lock()
+        }
+    }
+
+    #[inline(always)]
+    async fn sender_send(&self, json: String, mobile: bool) {
+        if let Err(e) = self.lock_sender(mobile).await.as_ref().expect("SENDER IS NOT INITIALIZED").send(json) {
+            eprintln!("[FATAL] could not send JSON: {e}")
+        }
+    }
+
     lock_fn! { files }
 }
 
@@ -342,15 +359,9 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
     };
 
     {
-        let files_progress_sender = &mut if mobile {
-            state.mobile_files_progress_sender.lock()
-        } else {
-            state.desktop_files_progress_sender.lock()
-        }.await;
-
+        let files_progress_sender = &mut state.lock_sender(mobile).await;
         if files_progress_sender.is_some() {
-            files_progress_sender.as_ref().unwrap().send("Connection replaced".to_owned()).unwrap();
-
+            state.sender_send("Connection replaced".to_owned(), mobile);
             **files_progress_sender = Some(ptx);
             return HttpResponse::Ok()
                 .append_header(("Content-Type", "text/event-stream"))
@@ -372,14 +383,7 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
     }).collect::<Vec::<_>>();
 
     let json = serde_json::to_string(&data).unwrap();
-
-    if let Err(e) = if mobile {
-        state.mobile_files_progress_sender.lock()
-    } else {
-        state.desktop_files_progress_sender.lock()
-    }.await.as_ref().unwrap().send(json) {
-        eprintln!("[FATAL] could not send JSON: {e}")
-    }
+    state.sender_send(json, mobile);
 
     let state = Data::clone(&state);
     actix_rt::spawn(async move {
@@ -394,14 +398,7 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
             }).collect::<Vec::<_>>();
 
             let json = serde_json::to_string(&data).unwrap();
-
-            if let Err(e) = if mobile {
-                state.mobile_files_progress_sender.lock()
-            } else {
-                state.desktop_files_progress_sender.lock()
-            }.await.as_ref().unwrap().send(json) {
-                eprintln!("[FATAL] could not send JSON: {e}")
-            }
+            state.sender_send(json, mobile)
         }
     });
 
