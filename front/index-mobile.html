@@ -136,6 +136,9 @@
         position: absolute;
         z-index: 1;
       }
+      #upload-form {
+        margin-bottom: -11%;
+      }
       #drag_and_drop-menu {
         height: 280px;
         width: 280px;
@@ -372,19 +375,20 @@
         <div id="menu-active">drop here</div>
       </div>
       <input type="file" id="file-input" name="files" multiple required/>
-      <button type="button" id="upload-button">upload</button>
     </form>
     <div class="logs_container">
+      <button type="button" id="upload-button">upload</button>
       <div>
         <div class="logs">UPLOAD LOGS</div>
         <div id="upload_status" class="status"></div>
       </div>
+      <button type="button" id="download-button">download</button>
       <div>
         <div class="logs">DOWNLOAD LOGS</div>
         <div id="download_status" class="status"></div>
       </div>
+    </div>
 
-    <button type="button" id="download-button">download</button>
     <script src="index-mobile.js"></script>
   </body>
 </html>
