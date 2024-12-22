@@ -7,13 +7,13 @@ use std::io::{Cursor, Write, BufWriter};
 use serde::Serialize;
 use dashmap::DashMap;
 use actix_web::rt as actix_rt;
-use tokio::sync::{mpsc, watch};
 use qrcodegen::{QrCode, QrCodeEcc};
 use actix_files::Files as ActixFiles;
 use actix_web::{get, post, HttpRequest};
 use tokio_stream::wrappers::WatchStream;
 use futures_util::{StreamExt, TryStreamExt};
 use actix_multipart::{Multipart, MultipartError};
+use tokio::sync::{mpsc, watch, Mutex as TokioMutex};
 use zip::{ZipWriter, CompressionMethod, write::SimpleFileOptions};
 use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Data}};
 
@@ -77,8 +77,8 @@ pub struct Client {
     size: usize,
 }
 
-type ProgressPinger = Arc::<tokio::sync::Mutex::<Option::<mpsc::Sender::<()>>>>;
-type ProgressSender = Arc::<tokio::sync::Mutex::<Option::<watch::Sender::<String>>>>;
+type ProgressPinger = Arc::<TokioMutex::<Option::<mpsc::Sender::<()>>>>;
+type ProgressSender = Arc::<TokioMutex::<Option::<watch::Sender::<String>>>>;
 
 type Clients = DashMap::<String, Client>;
 
@@ -170,7 +170,7 @@ struct Server {
 
 impl Server {
     #[inline(always)]
-    fn lock_sender(&self, mobile: bool) -> impl Future::<Output = tokio::sync::MutexGuard::<Option::<watch::Sender::<String>>>> {
+    fn lock_sender(&self, mobile: bool) -> impl Future::<Output = TokioMutexGuard::<Option::<watch::Sender::<String>>>> {
         if mobile {
             self.mobile_files_progress_sender.lock()
         } else {
@@ -441,9 +441,9 @@ async fn main() -> std::io::Result<()> {
     let server = Data::new(Server {        
         clients: Arc::new(DashMap::new()),
         files: Arc::new(Mutex::new(Vec::new())),
-        progress_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        mobile_files_progress_sender: Arc::new(tokio::sync::Mutex::new(None)),
-        desktop_files_progress_sender: Arc::new(tokio::sync::Mutex::new(None)),
+        progress_tx: Arc::new(TokioMutex::new(None)),
+        mobile_files_progress_sender: Arc::new(TokioMutex::new(None)),
+        desktop_files_progress_sender: Arc::new(TokioMutex::new(None)),
         qr_bytes: gen_qr_png_bytes(&qr).expect("Could not generate QR code image").into()
     });
 
