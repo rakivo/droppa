@@ -6,8 +6,9 @@ use std::io::{Cursor, Write, BufWriter};
 use serde::Serialize;
 use dashmap::DashMap;
 use actix_web::rt as actix_rt;
-use qrcodegen::{QrCode, QrCodeEcc};
 use tokio::sync::{mpsc, watch};
+use qrcodegen::{QrCode, QrCodeEcc};
+use actix_files::Files as ActixFiles;
 use actix_web::{get, post, HttpRequest};
 use tokio_stream::wrappers::WatchStream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -54,10 +55,8 @@ define_addr_port! {
 const GIG: usize = 1024 * 1024 * 1024;
 const SIZE_LIMIT: usize = GIG * 1;
 
-const HOME_DESKTOP_HTML:   &[u8] = include_bytes!("../front/index-desktop.html");
-const HOME_DESKTOP_SCRIPT: &[u8] = include_bytes!("../front/index-desktop.js");
 const HOME_MOBILE_HTML:    &[u8] = include_bytes!("../front/index-mobile.html");
-const HOME_MOBILE_SCRIPT:  &[u8] = include_bytes!("../front/index-mobile.js");
+const HOME_DESKTOP_HTML:   &[u8] = include_bytes!("../front/index-desktop.html");
 
 atomic_type! {
     type Files = Vec::<File>;
@@ -108,7 +107,7 @@ impl File {
                 }
 
                 let size = unsafe { size.unwrap_unchecked() };
-                if bytes.try_reserve_exact(size / 8).is_err() {
+                if bytes.try_reserve_exact(size / std::mem::size_of::<u8>()).is_err() {
                     return Err("could not reserve memory")
                 }
 
@@ -192,12 +191,12 @@ async fn track_progress(rq: HttpRequest, path: web::Path::<String>, state: Data:
         return HttpResponse::BadRequest().body("Request to `/` that does not contain user agent")
     };
 
-    let tx = watch::channel(0).0;
-    
     let file_name = path.into_inner();
     println!("[INFO] client connected to <http://localhost:8080/progress/{file_name}>");
     
+    let tx = watch::channel(0).0;
     let rx = WatchStream::new(tx.subscribe());
+
     println!("[INFO] inserted: {file_name} into the clients hashmap");
     state.clients.insert(file_name, Client {
         sender: tx,
@@ -230,20 +229,6 @@ async fn index(rq: HttpRequest) -> impl Responder {
             .append_header(("Content-Type", "text/html"))
             .body(HOME_DESKTOP_HTML)
     }
-}
-
-#[get("/index-mobile.js")]
-async fn index_mobile_js() -> impl Responder {
-    HttpResponse::Ok()
-        .append_header(("Content-Type", "application/javascript; charset=UTF-8"))
-        .body(HOME_MOBILE_SCRIPT)
-}
-
-#[get("/index-desktop.js")]
-async fn index_desktop_js() -> impl Responder {
-    HttpResponse::Ok()
-        .append_header(("Content-Type", "application/javascript; charset=UTF-8"))
-        .body(HOME_DESKTOP_SCRIPT)
 }
 
 #[get("/qr.png")]
@@ -477,9 +462,8 @@ async fn main() -> std::io::Result<()> {
             .service(track_progress)
             .service(download_files)
             .service(upload_desktop)
-            .service(index_mobile_js)
-            .service(index_desktop_js)
             .service(download_files_progress_mobile)
             .service(download_files_progress_desktop)
+            .service(ActixFiles::new("/", "./front"))
     }).bind((local_ip.to_string(), PORT))?.run().await
 }
