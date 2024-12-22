@@ -326,25 +326,30 @@ async fn download_files(state: web::Data::<Server>) -> impl Responder {
 
     let files = Arc::clone(&state.files);
     let Ok(Ok(zip_bytes)) = actix_rt::task::spawn_blocking(move || {
-        let files = files.lock().unwrap();
-        let size = files.iter().map(|f| f.size).sum::<usize>();
+        let (size, len) = {
+            let files = files.lock().unwrap();
+            let size = files.iter().map(|f| f.size).sum::<usize>();
+            (size, files.len())
+        };
 
         let mut zip_bytes = Cursor::new(Vec::with_capacity(size));
+
         let mut zip = ZipWriter::new(&mut zip_bytes);
         let mut opts = SimpleFileOptions::default()
             .compression_level(Some(8))
             .compression_method(CompressionMethod::Deflated);
 
-        if size > const { GIG * 4 } || files.len() > 65536 {
-            opts = opts.large_file(true);
+        if size > const { GIG * 4 } || len > 65536 {
+            opts = opts.large_file(true)
         }
 
-        for File { name, bytes, .. } in files.iter() {
-            zip.start_file(&name, opts)?;
-            zip.write_all(&bytes)?;
+        {
+            let files = files.lock().unwrap();
+            for File { name, bytes, .. } in files.iter() {
+                zip.start_file(&name, opts)?;
+                zip.write_all(&bytes)?;
+            }
         }
-
-        drop(files);
 
         zip.finish().map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
