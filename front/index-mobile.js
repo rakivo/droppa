@@ -120,7 +120,7 @@ document
 
       downloadFiles.push(file);
 
-      const { message, fileNameSpan, status } = createMessage(file, "download");
+      const { message, fileNameSpan, messageStatusDiv } = createMessage(file, "download");
 
       while (true) {
         const { done, value } = await reader.read();
@@ -133,7 +133,7 @@ document
         loaded += value.length;
 
         // Calculate progress
-        const progress = total ? (loaded / total) * 100 : 0;
+        const progress = total ? Math.floor((loaded / total) * 100) : 0;
         message.className = "status-message progress";
 
         messageStatusDiv.textContent = ` PREP ${progress}%`;

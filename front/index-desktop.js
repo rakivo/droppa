@@ -242,7 +242,7 @@ function watchDownloadFileProgress(downloadFileObject) {
   return downloadFileObject;
 }
 
-async function uploadFilesConcurrently(files, maxConcurrent = 4) {
+async function uploadFilesConcurrently(files, maxConcurrent = 3) {
   const semaphore = new Array(maxConcurrent).fill(Promise.resolve());
   for (const fileObject of files) {
     const slot = semaphore.shift();
