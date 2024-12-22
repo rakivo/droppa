@@ -20,7 +20,7 @@ function connectSSE() {
 
   eventSource.onmessage = (event) => {
     console.log("Received SSE message:", event.data);
-    if (event.data === "Connection replaced") {
+    if (event.data === "CONNECTION_REPLACED") {
       console.log("Connection replaced by the server.");
       eventSource.close();
       return;

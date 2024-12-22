@@ -361,7 +361,7 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
     {
         let files_progress_sender = &mut state.lock_sender(mobile).await;
         if files_progress_sender.is_some() {
-            state.sender_send("Connection replaced".to_owned(), mobile);
+            state.sender_send("CONNECTION_REPLACED".to_owned(), mobile).await;
             **files_progress_sender = Some(ptx);
             return HttpResponse::Ok()
                 .append_header(("Content-Type", "text/event-stream"))
@@ -383,7 +383,7 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
     }).collect::<Vec::<_>>();
 
     let json = serde_json::to_string(&data).unwrap();
-    state.sender_send(json, mobile);
+    state.sender_send(json, mobile).await;
 
     let state = Data::clone(&state);
     actix_rt::spawn(async move {
@@ -398,7 +398,7 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
             }).collect::<Vec::<_>>();
 
             let json = serde_json::to_string(&data).unwrap();
-            state.sender_send(json, mobile)
+            state.sender_send(json, mobile).await
         }
     });
 
