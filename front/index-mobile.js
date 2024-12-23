@@ -1,5 +1,7 @@
 let globalFiles = [];
 
+let downloadFiles = [];
+
 document.getElementById("drag_and_drop-menu").addEventListener("click", () => {
   document.getElementById("file-input").click();
 });
@@ -8,7 +10,8 @@ document
   .getElementById("drag_and_drop-menu")
   .addEventListener("dragover", (e) => {
     e.preventDefault();
-    document.getElementById("drag_and_drop-menu").className = "drag_and_drop-menu-active";
+    document.getElementById("drag_and_drop-menu").className =
+      "drag_and_drop-menu-active";
     document.getElementById("menu").style.display = "none";
     document.getElementById("menu-active").style.display = "block";
   });
@@ -17,7 +20,8 @@ document
   .getElementById("drag_and_drop-menu")
   .addEventListener("dragend", (e) => {
     e.preventDefault();
-    document.getElementById("drag_and_drop-menu").className = "drag_and_drop-menu";
+    document.getElementById("drag_and_drop-menu").className =
+      "drag_and_drop-menu";
     document.getElementById("menu").style.display = "flex";
     document.getElementById("menu-active").style.display = "none";
   });
@@ -28,7 +32,8 @@ document
     ev.preventDefault();
     const statusDiv = document.getElementById("status");
 
-    document.getElementById("drag_and_drop-menu").className = "drag_and_drop-menu";
+    document.getElementById("drag_and_drop-menu").className =
+      "drag_and_drop-menu";
     document.getElementById("menu").style.display = "flex";
     document.getElementById("menu-active").style.display = "none";
 
@@ -42,7 +47,10 @@ document
 
     const files = Array.from(ev.dataTransfer.items);
     files.forEach((file) => {
-      const { message, fileNameSpan, messageStatusDiv } = createMessage(file.getAsFile());
+      const { message, fileNameSpan, messageStatusDiv } = createMessage(
+        file.getAsFile(),
+        "upload"
+      );
       const fullFileObject = {
         status: "idle",
         file: file.getAsFile(),
@@ -68,12 +76,15 @@ document
       return;
     }
 
-    await uploadFilesConcurrently(globalFiles);
+    await uploadFilesConcurrently(globalFiles, 4);
   });
 
 document.getElementById("file-input").addEventListener("change", (e) => {
   Array.from(e.target.files).forEach((file) => {
-    const { message, fileNameSpan, messageStatusDiv } = createMessage(file);
+    const { message, fileNameSpan, messageStatusDiv } = createMessage(
+      file,
+      "upload"
+    );
 
     const fullFileObject = {
       status: "idle",
@@ -87,30 +98,129 @@ document.getElementById("file-input").addEventListener("change", (e) => {
   });
 });
 
+async function openZipProgressConnection() {
+  return new Promise((resolve, reject) => {
+    const eventSource = new EventSource(`/zipping-progress`);
+
+    eventSource.onopen = () => {
+      console.log(`Progress connection for zip established.`);
+      resolve(eventSource);
+    };
+
+    eventSource.onerror = (error) => {
+      console.error(
+        `Error on opening progress connection for zip`,
+        error
+      );
+      eventSource.close();
+      reject(new Error(` zip FAILURE`));
+    };
+  });
+}
+
+function getZipFileName() {
+  return downloadFiles.length
+    ? "droppa_files.zip"
+    : `droppa_files_${downloadFiles.length}.zip`;
+}
+
+function fullFileObjectFromName(name) {
+  const file = { name: name };
+  const { message, fileNameSpan, messageStatusDiv } = createMessage(
+    file,
+    "download"
+  );
+
+  return {
+    status: "idle",
+    file: file,
+    message: message,
+    fileNameSpan: fileNameSpan,
+    messageStatusDiv: messageStatusDiv,
+  };
+}
+
 document
   .getElementById("download-button")
   .addEventListener("click", async (e) => {
-    fetch('/download-files-mobile')
-      .then(response => {
-        if (!response.ok) {
-          throw new Error('Failed to download ZIP file');
+    try {
+      console.log(`Opening progress connection for zip`);
+      const eventSource = await openZipProgressConnection();
+
+      console.log("Connection opened");
+
+      const file = {
+        name: getZipFileName(),
+        size: 69
+      };
+
+      const { message, fileNameSpan, messageStatusDiv } = createMessage(
+        file,
+        "download"
+      );
+
+      const fullFileObject = {
+        status: "idle",
+        file: file,
+        message: message,
+        fileNameSpan: fileNameSpan,
+        messageStatusDiv: messageStatusDiv,
+      };
+
+      downloadFiles.push(file);
+
+      trackProgress(eventSource, fullFileObject);
+
+      const response = await fetch("/download-files-mobile");
+
+      const contentLength = response.headers.get("Content-Length");
+      const total = contentLength ? parseInt(contentLength, 10) : 0;
+      let loaded = 0;
+
+      const reader = response.body.getReader();
+      const chunks = [];
+
+      fullFileObject.file.total = total;
+
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (done) {
+          break;
         }
-        return response.blob();  // Convert response to a Blob
-      })
-      .then(blob => {
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = 'example.zip';
-        link.click();
-        URL.revokeObjectURL(link.href);
-      })
-      .catch(error => {
-        console.error('Error downloading file:', error);
-      });
+
+        chunks.push(value);
+        loaded += value.length;
+
+        // Calculate progress
+        const progress = total ? Math.floor((loaded / total) * 100) : 0;
+        fullFileObject.message.className = "status-message progress";
+
+        fullFileObject.messageStatusDiv.textContent = ` PREP ${progress}%`;
+      }
+
+      const blob = new Blob(chunks);
+
+      if (!response.ok) {
+        throw new Error("Failed to download ZIP file");
+      }
+
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "droppa_files.zip";
+
+      fullFileObject.messageStatusDiv.textContent = `PREP SUCCESS`;
+      fullFileObject.message.className = "status-message success";
+
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (error) {
+      console.error("Error downloading file:", error);
+    }
   });
 
-function createMessage(file) {
-  const statusDiv = document.getElementById("status");
+function createMessage(file, transmissionType) {
+  const statusDiv = document.getElementById(`${transmissionType}_status`);
   const message = document.createElement("div");
   const fileNameSpan = document.createElement("span");
   const status = document.createElement("span");
@@ -206,6 +316,7 @@ async function trackProgress(eventSource, fileObject) {
   let isComplete = false;
 
   eventSource.onmessage = (event) => {
+    console.log("Received SSE message:", event.data);
     const progressData = JSON.parse(event.data);
     if (progressData.progress !== undefined) {
       const progress = progressData.progress;

@@ -1,6 +1,6 @@
 let globalFiles = [];
 
-let downloadFiles = new Map;
+let downloadFiles = new Map();
 
 let eventSource = null;
 
@@ -52,7 +52,7 @@ function connectSSE() {
     if (eventSource) {
       eventSource.close();
       eventSource = null;
-      setTimeout(() => (connectSSE()), 2500);
+      setTimeout(() => connectSSE(), 2500);
     }
   };
 }

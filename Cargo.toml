@@ -7,6 +7,9 @@ edition = "2021"
 name = "droppa"
 path = "back/main.rs"
 
+[features]
+dbg = []
+
 [dependencies]
 paste           = { version = "=1.0.15",  default-features = false                         }
 qrcodegen       = { version = "=1.8.0",   default-features = false                         }
