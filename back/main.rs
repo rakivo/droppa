@@ -430,9 +430,14 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
     };
 
     {
-        let files_progress_streamer = &mut state.lock_streamer(mobile).await;
+        let files_progress_streamer = &mut if mobile {
+            state.mobile_files_progress_streamer.lock()
+        } else {
+            state.desktop_files_progress_streamer.lock()
+        }.await;
+
         if files_progress_streamer.is_some() {
-            state.streamer_send("CONNECTION_REPLACED".to_owned(), mobile).await;
+            files_progress_streamer.as_ref().unwrap().send("CONNECTION_REPLACED".to_owned()).unwrap();
             **files_progress_streamer = Some(ptx);
             return HttpResponse::Ok()
                 .append_header(("Content-Type", "text/event-stream"))
