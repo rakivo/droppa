@@ -1,8 +1,8 @@
 use std::fs;
 use std::future::Future;
 use std::net::{IpAddr, UdpSocket};
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::io::{Cursor, Write, BufWriter};
+use std::sync::{Arc, Mutex, MutexGuard, atomic::{Ordering, AtomicUsize}};
 
 use serde::Serialize;
 use dashmap::DashMap;
@@ -78,8 +78,9 @@ pub struct Client {
     size: usize,
 }
 
+type SyncProgressSender = Arc::<Mutex::<Option::<mpsc::Sender::<u8>>>>;
 type ProgressPinger = Arc::<TokioMutex::<Option::<mpsc::Sender::<()>>>>;
-type ProgressSender = Arc::<TokioMutex::<Option::<watch::Sender::<String>>>>;
+type ProgressStreamer = Arc::<TokioMutex::<Option::<watch::Sender::<String>>>>;
 
 type Clients = DashMap::<String, Client>;
 
@@ -175,24 +176,26 @@ struct Server {
     files: AtomicFiles,
     qr_bytes: web::Bytes,
     clients: Arc::<Clients>,
-    progress_tx: ProgressPinger,
-    mobile_files_progress_sender: ProgressSender,
-    desktop_files_progress_sender: ProgressSender
+    files_progress_pinger: ProgressPinger,
+    zipping_progress_sender: SyncProgressSender,
+    zipping_progress_streamer: ProgressStreamer,
+    mobile_files_progress_streamer: ProgressStreamer,
+    desktop_files_progress_streamer: ProgressStreamer
 }
 
 impl Server {
     #[inline(always)]
-    fn lock_sender(&self, mobile: bool) -> impl Future::<Output = TokioMutexGuard::<Option::<watch::Sender::<String>>>> {
+    fn lock_streamer(&self, mobile: bool) -> impl Future::<Output = TokioMutexGuard::<Option::<watch::Sender::<String>>>> {
         if mobile {
-            self.mobile_files_progress_sender.lock()
+            self.mobile_files_progress_streamer.lock()
         } else {
-            self.desktop_files_progress_sender.lock()
+            self.desktop_files_progress_streamer.lock()
         }
     }
 
     #[inline(always)]
-    async fn sender_send(&self, json: String, mobile: bool) {
-        if let Err(e) = self.lock_sender(mobile).await.as_ref().expect("SENDER IS NOT INITIALIZED").send(json) {
+    async fn streamer_send(&self, json: String, mobile: bool) {
+        if let Err(e) = self.lock_streamer(mobile).await.as_ref().expect("SENDER IS NOT INITIALIZED").send(json) {
             eprintln!("[FATAL] could not send JSON: {e}")
         }
     }
@@ -221,7 +224,7 @@ async fn track_progress(rq: HttpRequest, path: Path::<String>, state: Data::<Ser
     };
 
     let file_name = path.into_inner();
-    println!("[INFO] client connected to <http://localhost:8080/progress/{file_name}>");
+    println!("[INFO] client connected to <http://localhost:{PORT}/progress/{file_name}>");
     
     let tx = watch::channel(0).0;
     let rx = WatchStream::new(tx.subscribe());
@@ -271,7 +274,7 @@ async fn qr_code(state: Data::<Server>) -> impl Responder {
 async fn upload_desktop(mut multipart: Multipart, state: Data::<Server>) -> impl Responder {
     println!("[INFO] upload-desktop requested, parsing multipart..");
 
-    let File { bytes, name, size } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients), Arc::clone(&state.progress_tx)).await {
+    let File { bytes, name, size } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients), Arc::clone(&state.files_progress_pinger)).await {
         Ok(f) => f,
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
@@ -289,7 +292,7 @@ async fn upload_desktop(mut multipart: Multipart, state: Data::<Server>) -> impl
 async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl Responder {
     println!("[INFO] upload-mobile requested, parsing multipart..");
 
-    let File { bytes, name, size } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients), Arc::clone(&state.progress_tx)).await {
+    let File { bytes, name, size } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients), Arc::clone(&state.files_progress_pinger)).await {
         Ok(f) => f,
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
@@ -320,6 +323,55 @@ async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl 
     HttpResponse::Ok().finish()
 }
 
+struct ProgressTracker<W: Write> {
+    writer: W,
+    total_size: usize,
+    written: AtomicUsize,
+    progress_sender: SyncProgressSender
+}
+
+impl<W: Write> ProgressTracker::<W> {
+    #[inline]
+    pub fn new(writer: W, total_size: usize, progress_sender: SyncProgressSender) -> Self {
+        Self {
+            writer,
+            total_size,
+            progress_sender,
+            written: AtomicUsize::new(0),
+        }
+    }
+
+    #[inline]
+    pub fn progress(&self) -> u64 {
+        let written = self.written.load(Ordering::Relaxed);
+        if written >= self.total_size - 1 {
+            100
+        } else {
+            (written * 100 / self.total_size).min(100) as _
+        }
+    }
+}
+
+impl<W: Write> Write for ProgressTracker::<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result::<usize> {
+        let written = self.writer.write(buf)?;
+        self.written.fetch_add(written, Ordering::Relaxed);
+
+        let p = self.progress();
+        if p % 5 == 0 {
+            let progress_sender = self.progress_sender.lock().unwrap();
+            progress_sender.as_ref().map(|ps| ps.try_send(p as _));
+        }
+
+        Ok(written)
+    }
+
+    #[inline(always)]
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
 #[get("/download-files-mobile")]
 async fn download_files(state: Data::<Server>) -> impl Responder {
     println!("[INFO] download files requested, zipping them up..");
@@ -334,26 +386,28 @@ async fn download_files(state: Data::<Server>) -> impl Responder {
 
         let mut zip_bytes = Cursor::new(Vec::with_capacity(size));
 
-        let mut zip = ZipWriter::new(&mut zip_bytes);
-        let mut opts = SimpleFileOptions::default()
-            .compression_level(Some(8))
-            .compression_method(CompressionMethod::Deflated);
-
-        if size > const { GIG * 4 } || len > 65536 {
-            opts = opts.large_file(true)
-        }
-
         {
-            let files = files.lock().unwrap();
-            for File { name, bytes, .. } in files.iter() {
-                zip.start_file(&name, opts)?;
-                zip.write_all(&bytes)?;
-            }
-        }
+            let mut opts = SimpleFileOptions::default()
+                .compression_level(Some(8))
+                .compression_method(CompressionMethod::Deflated);
 
-        zip.finish().map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
+            if size > const { GIG * 4 } || len > 65536 {
+                opts = opts.large_file(true)
+            }
+
+            let mut zip = ProgressTracker::new(ZipWriter::new(&mut zip_bytes), size, Arc::clone(&state.zipping_progress_sender));
+            {
+                let files = files.lock().unwrap();
+                for File { name, bytes, .. } in files.iter() {
+                    zip.writer.start_file(&name, opts)?;
+                    zip.write_all(&bytes)?
+                }
+            }
+
+            zip.writer.finish().map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+            })?;
+        }
 
         Ok::<_, std::io::Error>(zip_bytes.into_inner())
     }).await else {
@@ -368,32 +422,35 @@ async fn download_files(state: Data::<Server>) -> impl Responder {
 
 async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder {
     let ptx = watch::channel("[]".to_owned()).0;
-    let prx = WatchStream::new(ptx.subscribe());
+    let streamer = WatchStream::new(ptx.subscribe());
 
     println!{
-        "[INFO] client connected to <http://localhost:8080/download-files-progress-{device}>",
+        "[INFO] client connected to <http://localhost:{PORT}/download-files-progress-{device}>",
         device = if mobile { "mobile" } else { "desktop" }
     };
 
     {
-        let files_progress_sender = &mut state.lock_sender(mobile).await;
-        if files_progress_sender.is_some() {
-            state.sender_send("CONNECTION_REPLACED".to_owned(), mobile).await;
-            **files_progress_sender = Some(ptx);
+        let files_progress_streamer = &mut state.lock_streamer(mobile).await;
+        if files_progress_streamer.is_some() {
+            state.streamer_send("CONNECTION_REPLACED".to_owned(), mobile).await;
+            **files_progress_streamer = Some(ptx);
             return HttpResponse::Ok()
                 .append_header(("Content-Type", "text/event-stream"))
                 .append_header(("Cache-Control", "no-cache"))
                 .append_header(("Connection", "keep-alive"))
-                .streaming(prx.map(|data| {
+                .streaming(streamer.map(|data| {
                     Ok::<_, actix_web::Error>(format!("data: {data}\n\n").into())
                 }))
         }
 
-        **files_progress_sender = Some(ptx)
+        **files_progress_streamer = Some(ptx)
     }
 
     let (tx, mut rx) = mpsc::channel(8);
-    *state.progress_tx.lock().await = Some(tx);
+
+    {
+        *state.files_progress_pinger.lock().await = Some(tx)
+    }
 
     let state = Data::clone(&state);
     actix_rt::spawn(async move {
@@ -408,7 +465,7 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
             }).collect::<Vec::<_>>();
 
             let json = serde_json::to_string(&data).unwrap();
-            state.sender_send(json, mobile).await;
+            state.streamer_send(json, mobile).await;
             tokio_sleep(TokioDuration::from_millis(100)).await;
         }
     });
@@ -417,7 +474,7 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
         .append_header(("Content-Type", "text/event-stream"))
         .append_header(("Cache-Control", "no-cache"))
         .append_header(("Connection", "keep-alive"))
-        .streaming(prx.map(|data| {
+        .streaming(streamer.map(|data| {
             Ok::<_, actix_web::Error>(format!("data: {data}\n\n").into())
         }))
 }
@@ -430,6 +487,62 @@ async fn download_files_progress_mobile(state: Data::<Server>) -> impl Responder
 #[get("/download-files-progress-desktop")]
 async fn download_files_progress_desktop(state: Data::<Server>) -> impl Responder {
     stream_progress(state, false).await
+}
+
+#[get("/zipping-progress")]
+async fn zipping_progress(state: Data::<Server>) -> impl Responder {
+    let ptx = watch::channel("[]".to_owned()).0;
+    let streamer = WatchStream::new(ptx.subscribe());
+
+    println!("[INFO] client connected to <http://localhost:{PORT}/zipping_progress>");
+
+    {
+        let zipping_progress_streamer = &mut state.zipping_progress_streamer.lock().await;
+        if zipping_progress_streamer.is_some() {
+            if let Err(e) = state.zipping_progress_streamer.lock().await.as_ref().expect("SENDER IS NOT INITIALIZED").send("CONNECTION_REPLACED".to_owned()) {
+                eprintln!("[FATAL] could not send JSON: {e}")
+            }
+
+            **zipping_progress_streamer = Some(ptx);
+            return HttpResponse::Ok()
+                .append_header(("Content-Type", "text/event-stream"))
+                .append_header(("Cache-Control", "no-cache"))
+                .append_header(("Connection", "keep-alive"))
+                .streaming(streamer.map(|data| {
+                    Ok::<_, actix_web::Error>(format!("data: {data}\n\n").into())
+                }))
+        }
+
+        **zipping_progress_streamer = Some(ptx)
+    }
+
+    let (tx, mut rx) = mpsc::channel(8);
+
+    {
+        *state.zipping_progress_sender.lock().unwrap() = Some(tx)
+    }
+
+    let state = Data::clone(&state);
+    actix_rt::spawn(async move {
+        loop {
+            if let Ok(progress) = rx.try_recv() {
+                let streamer = state.zipping_progress_streamer.lock().await;
+                let streamer = streamer.as_ref().unwrap();
+                _ = streamer.send(format!("{{ \"progress\": {progress} }}"));
+                tokio_sleep(TokioDuration::from_millis(100)).await
+            } else {
+                tokio_sleep(TokioDuration::from_millis(150)).await
+            }
+        }
+    });
+
+    HttpResponse::Ok()
+        .append_header(("Content-Type", "text/event-stream"))
+        .append_header(("Cache-Control", "no-cache"))
+        .append_header(("Connection", "keep-alive"))
+        .streaming(streamer.map(|data| {
+            Ok::<_, actix_web::Error>(format!("data: {data}\n\n").into())
+        }))
 }
 
 fn get_default_local_ip_addr() -> Option::<IpAddr> {
@@ -452,9 +565,11 @@ async fn main() -> std::io::Result<()> {
     let server = Data::new(Server {
         clients: Arc::new(DashMap::new()),
         files: Arc::new(Mutex::new(Vec::new())),
-        progress_tx: Arc::new(TokioMutex::new(None)),
-        mobile_files_progress_sender: Arc::new(TokioMutex::new(None)),
-        desktop_files_progress_sender: Arc::new(TokioMutex::new(None)),
+        zipping_progress_sender: Arc::new(Mutex::new(None)),
+        files_progress_pinger: Arc::new(TokioMutex::new(None)),
+        zipping_progress_streamer: Arc::new(TokioMutex::new(None)),
+        mobile_files_progress_streamer: Arc::new(TokioMutex::new(None)),
+        desktop_files_progress_streamer: Arc::new(TokioMutex::new(None)),
         qr_bytes: gen_qr_png_bytes(&qr).expect("could not generate QR code image").into()
     });
 
@@ -470,6 +585,7 @@ async fn main() -> std::io::Result<()> {
             .service(track_progress)
             .service(download_files)
             .service(upload_desktop)
+            .service(zipping_progress)
             .service(download_files_progress_mobile)
             .service(download_files_progress_desktop)
             .service(ActixFiles::new("/", "./front"))

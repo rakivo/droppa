@@ -98,10 +98,79 @@ document.getElementById("file-input").addEventListener("change", (e) => {
   });
 });
 
+async function openZipProgressConnection() {
+  return new Promise((resolve, reject) => {
+    const eventSource = new EventSource(`/zipping-progress`);
+
+    eventSource.onopen = () => {
+      console.log(`Progress connection for zip established.`);
+      resolve(eventSource);
+    };
+
+    eventSource.onerror = (error) => {
+      console.error(
+        `Error on opening progress connection for zip`,
+        error
+      );
+      eventSource.close();
+      reject(new Error(` zip FAILURE`));
+    };
+  });
+}
+
+function getZipFileName() {
+  return downloadFiles.length
+    ? "droppa_files.zip"
+    : `droppa_files_${downloadFiles.length}.zip`;
+}
+
+function fullFileObjectFromName(name) {
+  const file = { name: name };
+  const { message, fileNameSpan, messageStatusDiv } = createMessage(
+    file,
+    "download"
+  );
+
+  return {
+    status: "idle",
+    file: file,
+    message: message,
+    fileNameSpan: fileNameSpan,
+    messageStatusDiv: messageStatusDiv,
+  };
+}
+
 document
   .getElementById("download-button")
   .addEventListener("click", async (e) => {
     try {
+      console.log(`Opening progress connection for zip`);
+      const eventSource = await openZipProgressConnection();
+
+      console.log("Connection opened");
+
+      const file = {
+        name: getZipFileName(),
+        size: 69
+      };
+
+      const { message, fileNameSpan, messageStatusDiv } = createMessage(
+        file,
+        "download"
+      );
+
+      const fullFileObject = {
+        status: "idle",
+        file: file,
+        message: message,
+        fileNameSpan: fileNameSpan,
+        messageStatusDiv: messageStatusDiv,
+      };
+
+      downloadFiles.push(file);
+
+      trackProgress(eventSource, fullFileObject);
+
       const response = await fetch("/download-files-mobile");
 
       const contentLength = response.headers.get("Content-Length");
@@ -111,16 +180,7 @@ document
       const reader = response.body.getReader();
       const chunks = [];
 
-      const file = {
-        name: downloadFiles.length
-          ? "droppa_files.zip"
-          : `droppa_files_${downloadFiles.length}.zip`,
-        size: total,
-      };
-
-      downloadFiles.push(file);
-
-      const { message, fileNameSpan, messageStatusDiv } = createMessage(file, "download");
+      fullFileObject.file.total = total;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -134,9 +194,9 @@ document
 
         // Calculate progress
         const progress = total ? Math.floor((loaded / total) * 100) : 0;
-        message.className = "status-message progress";
+        fullFileObject.message.className = "status-message progress";
 
-        messageStatusDiv.textContent = ` PREP ${progress}%`;
+        fullFileObject.messageStatusDiv.textContent = ` PREP ${progress}%`;
       }
 
       const blob = new Blob(chunks);
@@ -149,8 +209,8 @@ document
       link.href = URL.createObjectURL(blob);
       link.download = "droppa_files.zip";
 
-      messageStatusDiv.textContent = `PREP SUCCESS`;
-      message.className = "status-message success";
+      fullFileObject.messageStatusDiv.textContent = `PREP SUCCESS`;
+      fullFileObject.message.className = "status-message success";
 
       link.click();
       URL.revokeObjectURL(link.href);
@@ -256,6 +316,7 @@ async function trackProgress(eventSource, fileObject) {
   let isComplete = false;
 
   eventSource.onmessage = (event) => {
+    console.log("Received SSE message:", event.data);
     const progressData = JSON.parse(event.data);
     if (progressData.progress !== undefined) {
       const progress = progressData.progress;
