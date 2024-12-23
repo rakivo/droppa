@@ -16,7 +16,7 @@ use actix_multipart::{Multipart, MultipartError};
 use zip::{ZipWriter, CompressionMethod, write::SimpleFileOptions};
 use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use tokio::sync::{mpsc, watch, Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
-use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Data}};
+use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Path, Data}};
 
 #[allow(unused_imports, unused_parens, non_camel_case_types, unused_mut, dead_code, unused_assignments, unused_variables, static_mut_refs, non_snake_case, non_upper_case_globals)]
 mod stb_image_write;
@@ -215,7 +215,7 @@ fn user_agent_is_mobile(user_agent: &str) -> bool {
 }
 
 #[get("/progress/{file_name}")]
-async fn track_progress(rq: HttpRequest, path: web::Path::<String>, state: Data::<Server>) -> impl Responder {
+async fn track_progress(rq: HttpRequest, path: Path::<String>, state: Data::<Server>) -> impl Responder {
     let Some(user_agent) = rq.headers().get("User-Agent").and_then(|header| header.to_str().ok()) else {
         return HttpResponse::BadRequest().body("Request to `/` that does not contain user agent")
     };
@@ -321,7 +321,7 @@ async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl 
 }
 
 #[get("/download-files-mobile")]
-async fn download_files(state: web::Data::<Server>) -> impl Responder {
+async fn download_files(state: Data::<Server>) -> impl Responder {
     println!("[INFO] download files requested, zipping them up..");
 
     let files = Arc::clone(&state.files);
@@ -462,7 +462,7 @@ async fn main() -> std::io::Result<()> {
         progress_tx: Arc::new(TokioMutex::new(None)),
         mobile_files_progress_sender: Arc::new(TokioMutex::new(None)),
         desktop_files_progress_sender: Arc::new(TokioMutex::new(None)),
-        qr_bytes: gen_qr_png_bytes(&qr).expect("Could not generate QR code image").into()
+        qr_bytes: gen_qr_png_bytes(&qr).expect("could not generate QR code image").into()
     });
 
     println!("[INFO] serving at: <http://{local_ip}:{PORT}>");
