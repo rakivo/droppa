@@ -12,10 +12,10 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=DM+Serif+Text:ital@0;1&family=Source+Code+Pro:ital,wght@0,200..900;1,200..900&display=swap"
+      href="https://fonts.googleapis.com/css2?family=DM+Serif+Text:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=DM+Serif+Text:ital@0;1&family=Source+Code+Pro:ital,wght@0,200..900;1,200..900&display=swap"
       rel="stylesheet"
     />
-    <title>Multi File Upload with Progress</title>
+    <title>droppa</title>
     <style>
       body {
         font-family: Arial, sans-serif;
@@ -144,10 +144,10 @@
         width: 280px;
         border-radius: 18px;
         background-color: #d9d9d9;
-        font-size: 30px;
+        font-size: 35px;
         color: #000;
-        font-family: "DM Sans", sans-serif;
-        font-weight: 600;
+        font-family: "DM Serif Text", sans-serif;
+        font-weight: 500;
         cursor: pointer;
         display: flex;
         flex-direction: column;
@@ -157,11 +157,6 @@
       }
       .drag_and_drop-menu-active {
         border: dashed 3px #000;
-      }
-      .line {
-        height: 2px;
-        width: 200px;
-        background-color: #000;
       }
       #menu {
         display: flex;
@@ -368,9 +363,7 @@
     <form id="upload-form" onsubmit="(e) => e.preventDefault()">
       <div id="drag_and_drop-menu" class="drag_and_drop-menu">
         <div id="menu">
-          <div class="line"></div>
           <span id="browse-files">browse files</span>
-          <div class="line"></div>
         </div>
         <div id="menu-active">drop here</div>
       </div>
