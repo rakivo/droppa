@@ -355,7 +355,7 @@ async fn download_files(state: Data::<Server>) -> impl Responder {
             std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
         })?;
 
-        Ok::<Vec::<u8>, std::io::Error>(zip_bytes.into_inner())
+        Ok::<_, std::io::Error>(zip_bytes.into_inner())
     }).await else {
         return HttpResponse::SeeOther().body("error zipping up your files")
     };
@@ -394,13 +394,6 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
 
     let (tx, mut rx) = mpsc::channel(8);
     *state.progress_tx.lock().await = Some(tx);
-
-    let data = state.clients.iter().filter(|p| p.mobile != mobile).map(|p| {
-        TrackFile { name: p.key().to_owned(), progress: 0, size: p.size }
-    }).collect::<Vec::<_>>();
-
-    let json = serde_json::to_string(&data).unwrap();
-    state.sender_send(json, mobile).await;
 
     let state = Data::clone(&state);
     actix_rt::spawn(async move {
@@ -456,7 +449,7 @@ async fn main() -> std::io::Result<()> {
     let local_addr = format!("http://{local_ip}:{PORT}");
     let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode URL to QR code");
 
-    let server = Data::new(Server {        
+    let server = Data::new(Server {
         clients: Arc::new(DashMap::new()),
         files: Arc::new(Mutex::new(Vec::new())),
         progress_tx: Arc::new(TokioMutex::new(None)),
