@@ -310,9 +310,9 @@ async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl 
         println!("[INFO] copying bytes to: {name}..");
 
         let mut wbuf = BufWriter::with_capacity(size, file);
-        _ = wbuf.write_all(&bytes).map_err(|e| {
-            return format!("could not copy bytes: {name}: {e}")
-        });
+        if let Err(e) = wbuf.write_all(&bytes) {
+            return Err(format!("could not copy bytes: {name}: {e}"))
+        }
 
         println!("[INFO] uploaded: {name}");
 
