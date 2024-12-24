@@ -421,25 +421,37 @@ async fn download_files(state: Data::<Server>) -> impl Responder {
         .body(zip_bytes)
 }
 
-async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder {
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// I could've used the `FnOnce` and `FnMut` traits here and called different async closures do to different things, //
+// but it seems that this feature is really, really underdeveloped yet.                                             //
+//                                                                                                                  //
+// I've tried to use `Pin` and `Box` and `Future` but it could not help, the compiler was unsatifisfied with the    //
+// lifetimes, because I need to accept the state and the ping_receiver by a reference.                              //
+//                                                                                                                  //
+// I think can make it compile, but the complexity the codebase will gain is certainly not worth the effort.        //
+//                                                                                                                  //
+// I value simplicity, so I decided to use an enum.                                                                 //
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+enum Transmission { Mobile, Zipping, Desktop }
+
+async fn stream_progress(state: Data::<Server>, transmission: Transmission) -> impl Responder {
+    use Transmission::*;
+
     let ptx = watch::channel("[]".to_owned()).0;
     let streamer = WatchStream::new(ptx.subscribe());
 
-    println!{
-        "[INFO] client connected to <http://localhost:{PORT}/download-files-progress-{device}>",
-        device = if mobile { "mobile" } else { "desktop" }
-    };
-
     {
-        let files_progress_streamer = &mut if mobile {
-            state.mobile_files_progress_streamer.lock()
-        } else {
-            state.desktop_files_progress_streamer.lock()
+        let progress_streamer = &mut match transmission {
+            Mobile  => state.mobile_files_progress_streamer.lock(),
+            Zipping => state.zipping_progress_streamer.lock(),
+            Desktop => state.desktop_files_progress_streamer.lock()
         }.await;
 
-        if files_progress_streamer.is_some() {
-            files_progress_streamer.as_ref().unwrap().send("CONNECTION_REPLACED".to_owned()).unwrap();
-            **files_progress_streamer = Some(ptx);
+        if progress_streamer.is_some() {
+            progress_streamer.as_ref().unwrap().send("CONNECTION_REPLACED".to_owned()).unwrap();
+            **progress_streamer = Some(ptx);
             return HttpResponse::Ok()
                 .append_header(("Content-Type", "text/event-stream"))
                 .append_header(("Cache-Control", "no-cache"))
@@ -449,32 +461,52 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
                 }))
         }
 
-        **files_progress_streamer = Some(ptx)
+        **progress_streamer = Some(ptx)
     }
 
-    let (tx, mut rx) = mpsc::channel(8);
+    match transmission {
+        Zipping => {
+            let (tx, mut rx) = mpsc::channel(8);
+            *state.zipping_progress_sender.lock().unwrap() = Some(tx);
 
-    {
-        *state.files_progress_pinger.lock().await = Some(tx)
-    }
-
-    let state = Data::clone(&state);
-    actix_rt::spawn(async move {
-        loop {
-            if rx.try_recv().is_err() {
-                tokio_sleep(TokioDuration::from_millis(150)).await;
-                continue
-            }
-
-            let data = state.clients.iter().filter(|p| p.mobile != mobile).map(|p| {
-                TrackFile { name: p.key().to_owned(), progress: p.progress, size: p.size }
-            }).collect::<Vec::<_>>();
-
-            let json = serde_json::to_string(&data).unwrap();
-            state.streamer_send(json, mobile).await;
-            tokio_sleep(TokioDuration::from_millis(100)).await;
+            let state = Data::clone(&state);
+            actix_rt::spawn(async move {
+                loop {
+                    if let Ok(progress) = rx.try_recv() {
+                        let streamer = state.zipping_progress_streamer.lock().await;
+                        let streamer = streamer.as_ref().unwrap();
+                        _ = streamer.send(format!("{{ \"progress\": {progress} }}"));
+                        tokio_sleep(TokioDuration::from_millis(100)).await
+                    } else {
+                        tokio_sleep(TokioDuration::from_millis(150)).await
+                    }
+                }
+            })
         }
-    });
+        _ => {
+            let (tx, mut rx) = mpsc::channel(8);
+            *state.files_progress_pinger.lock().await = Some(tx);
+
+            let state = Data::clone(&state);
+            actix_rt::spawn(async move {
+                loop {
+                    if rx.try_recv().is_err() {
+                        tokio_sleep(TokioDuration::from_millis(150)).await;
+                        continue
+                    }
+
+                    let mobile = matches!(transmission, Mobile);
+                    let data = state.clients.iter().filter(|p| p.mobile != mobile).map(|p| {
+                        TrackFile { name: p.key().to_owned(), progress: p.progress, size: p.size }
+                    }).collect::<Vec::<_>>();
+
+                    let json = serde_json::to_string(&data).unwrap();
+                    state.streamer_send(json, mobile).await;
+                    tokio_sleep(TokioDuration::from_millis(100)).await;
+                }
+            })
+        }
+    };
 
     HttpResponse::Ok()
         .append_header(("Content-Type", "text/event-stream"))
@@ -487,68 +519,17 @@ async fn stream_progress(state: Data::<Server>, mobile: bool) -> impl Responder 
 
 #[get("/download-files-progress-mobile")]
 async fn download_files_progress_mobile(state: Data::<Server>) -> impl Responder {
-    stream_progress(state, true).await
+    stream_progress(state, Transmission::Mobile).await
 }
 
 #[get("/download-files-progress-desktop")]
 async fn download_files_progress_desktop(state: Data::<Server>) -> impl Responder {
-    stream_progress(state, false).await
+    stream_progress(state, Transmission::Desktop).await
 }
 
 #[get("/zipping-progress")]
 async fn zipping_progress(state: Data::<Server>) -> impl Responder {
-    let ptx = watch::channel("[]".to_owned()).0;
-    let streamer = WatchStream::new(ptx.subscribe());
-
-    println!("[INFO] client connected to <http://localhost:{PORT}/zipping_progress>");
-
-    {
-        let zipping_progress_streamer = &mut state.zipping_progress_streamer.lock().await;
-        if zipping_progress_streamer.is_some() {
-            if let Err(e) = state.zipping_progress_streamer.lock().await.as_ref().expect("SENDER IS NOT INITIALIZED").send("CONNECTION_REPLACED".to_owned()) {
-                eprintln!("[FATAL] could not send JSON: {e}")
-            }
-
-            **zipping_progress_streamer = Some(ptx);
-            return HttpResponse::Ok()
-                .append_header(("Content-Type", "text/event-stream"))
-                .append_header(("Cache-Control", "no-cache"))
-                .append_header(("Connection", "keep-alive"))
-                .streaming(streamer.map(|data| {
-                    Ok::<_, actix_web::Error>(format!("data: {data}\n\n").into())
-                }))
-        }
-
-        **zipping_progress_streamer = Some(ptx)
-    }
-
-    let (tx, mut rx) = mpsc::channel(8);
-
-    {
-        *state.zipping_progress_sender.lock().unwrap() = Some(tx)
-    }
-
-    let state = Data::clone(&state);
-    actix_rt::spawn(async move {
-        loop {
-            if let Ok(progress) = rx.try_recv() {
-                let streamer = state.zipping_progress_streamer.lock().await;
-                let streamer = streamer.as_ref().unwrap();
-                _ = streamer.send(format!("{{ \"progress\": {progress} }}"));
-                tokio_sleep(TokioDuration::from_millis(100)).await
-            } else {
-                tokio_sleep(TokioDuration::from_millis(150)).await
-            }
-        }
-    });
-
-    HttpResponse::Ok()
-        .append_header(("Content-Type", "text/event-stream"))
-        .append_header(("Cache-Control", "no-cache"))
-        .append_header(("Connection", "keep-alive"))
-        .streaming(streamer.map(|data| {
-            Ok::<_, actix_web::Error>(format!("data: {data}\n\n").into())
-        }))
+    stream_progress(state, Transmission::Zipping).await
 }
 
 fn get_default_local_ip_addr() -> Option::<IpAddr> {
