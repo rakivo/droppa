@@ -41,26 +41,14 @@ macro_rules! atomic_type {
 
 macro_rules! lock_fn {
     ($($field: tt), *) => { $(paste::paste! {
-        #[track_caller]
-        #[inline(always)]
+        #[track_caller] #[inline(always)]
         fn [<lock_ $field>](&self) -> MutexGuard::<[<$field:camel>]> {
             self.$field.lock().unwrap()
         }
     })*};
 }
 
-macro_rules! define_addr_port {
-    (const ADDR: $addr_ty: ty = $addr: literal; const PORT: $port_ty: ty = $port: literal;) => {
-        #[allow(unused)] const ADDR: $addr_ty = $addr;
-        #[allow(unused)] const PORT: $port_ty = $port;
-        #[allow(unused)] const ADDR_PORT: &str = concat!($addr, ':', $port);
-    };
-}
-
-define_addr_port! {
-    const ADDR: &str = "0.0.0.0";
-    const PORT: u16 = 6969;
-}
+const PORT: u16 = 6969;
 
 const GIG: usize = 1024 * 1024 * 1024;
 const SIZE_LIMIT: usize = GIG * 1;
@@ -143,9 +131,10 @@ impl File {
                     return Err("`size` field must go first, not the `file` one")
                 };
 
-                _ = field.content_disposition()
-                    .get_filename()
-                    .map(|name_| name = name_.to_owned());
+                match field.content_disposition().get_filename() {
+                    Some(name_) => name = name_.to_owned(),
+                    _ => return Err("`file` field does not have a filename")
+                }
 
                 println!("[INFO {name}] size: {size}");
 
@@ -185,6 +174,10 @@ impl File {
     }
 }
 
+#[repr(u8)]
+#[derive(Copy, Clone)]
+enum Transmission { Mobile, Zipping, Desktop }
+
 struct Server {
     qr_bytes: web::Bytes,
 
@@ -202,17 +195,18 @@ struct Server {
 
 impl Server {
     #[inline(always)]
-    fn lock_streamer(&self, mobile: bool) -> impl Future::<Output = TokioMutexGuard::<Option::<watch::Sender::<String>>>> {
-        if mobile {
-            self.mobile_files_progress_streamer.lock()
-        } else {
-            self.desktop_files_progress_streamer.lock()
+    fn lock_streamer(&self, transmission: Transmission) -> impl Future::<Output = TokioMutexGuard::<Option::<watch::Sender::<String>>>> {
+        use Transmission::*;
+        match transmission {
+            Mobile  => self.mobile_files_progress_streamer.lock(),
+            Zipping => self.zipping_progress_streamer.lock(),
+            Desktop => self.desktop_files_progress_streamer.lock()
         }
     }
 
     #[inline(always)]
-    async fn streamer_send(&self, json: String, mobile: bool) {
-        if let Err(e) = self.lock_streamer(mobile).await.as_ref().expect("SENDER IS NOT INITIALIZED").send(json) {
+    async fn streamer_send(&self, json: String, transmission: Transmission) {
+        if let Err(e) = self.lock_streamer(transmission).await.as_ref().expect("SENDER IS NOT INITIALIZED").send(json) {
             eprintln!("[FATAL] could not send JSON: {e}")
         }
     }
@@ -269,15 +263,9 @@ async fn index(rq: HttpRequest) -> impl Responder {
         return HttpResponse::BadRequest().body("Request to `/` that does not contain user agent")
     };
 
-    if user_agent_is_mobile(user_agent) {
-        HttpResponse::Ok()
-            .append_header(("Content-Type", "text/html"))
-            .body(HOME_MOBILE_HTML)
-    } else {
-        HttpResponse::Ok()
-            .append_header(("Content-Type", "text/html"))
-            .body(HOME_DESKTOP_HTML)
-    }
+    HttpResponse::Ok()
+        .append_header(("Content-Type", "text/html"))
+        .body(if user_agent_is_mobile(user_agent) {HOME_MOBILE_HTML} else {HOME_DESKTOP_HTML}) 
 }
 
 #[get("/qr.png")]
@@ -291,15 +279,15 @@ async fn qr_code(state: Data::<Server>) -> impl Responder {
 async fn upload_desktop(mut multipart: Multipart, state: Data::<Server>) -> impl Responder {
     println!("[INFO] upload-desktop requested, parsing multipart..");
 
-    let File { bytes, name, size } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients), Arc::clone(&state.files_progress_pinger)).await {
+    let file = match File::from_multipart(&mut multipart, Arc::clone(&state.clients), Arc::clone(&state.files_progress_pinger)).await {
         Ok(f) => f,
         Err(e) => return HttpResponse::BadRequest().body(e)
     };
 
-    println!("[INFO] uploaded: {name}");
+    println!("[INFO] uploaded: {name}", name = file.name);
 
     {
-        state.lock_files().push(File { bytes, name, size });
+        state.lock_files().push(file);
     }
 
     HttpResponse::Ok().finish()
@@ -348,22 +336,17 @@ struct ProgressTracker<W: Write> {
 }
 
 impl<W: Write> ProgressTracker::<W> {
-    #[inline]
+    #[inline(always)]
     pub fn new(writer: W, total_size: usize, progress_sender: AtomicSyncProgressSender) -> Self {
-        Self {
-            writer,
-            written: 0,
-            total_size,
-            progress_sender
-        }
+        Self { writer, written: 0, total_size, progress_sender }
     }
 
     #[inline]
-    pub fn progress(&self) -> u64 {
-        if self.written >= self.total_size - 1 {
+    pub fn progress(&self) -> usize {
+        if self.written >= self.total_size {
             100
         } else {
-            (self.written * 100 / self.total_size).min(100) as _
+            (self.written * 100 / self.total_size).min(100)
         }
     }
 }
@@ -449,8 +432,6 @@ async fn download_files(state: Data::<Server>) -> impl Responder {
 // I value simplicity, so I decided to use an enum.                                                                 //
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-enum Transmission { Mobile, Zipping, Desktop }
-
 async fn stream_progress(state: Data::<Server>, transmission: Transmission) -> impl Responder {
     use Transmission::*;
 
@@ -458,12 +439,7 @@ async fn stream_progress(state: Data::<Server>, transmission: Transmission) -> i
     let streamer = WatchStream::new(ptx.subscribe());
 
     {
-        let progress_streamer = &mut match transmission {
-            Mobile  => state.mobile_files_progress_streamer.lock(),
-            Zipping => state.zipping_progress_streamer.lock(),
-            Desktop => state.desktop_files_progress_streamer.lock()
-        }.await;
-
+        let progress_streamer = &mut state.lock_streamer(transmission).await;
         if progress_streamer.is_some() {
             progress_streamer.as_ref().unwrap().send("CONNECTION_REPLACED".to_owned()).unwrap();
             **progress_streamer = Some(ptx);
@@ -516,7 +492,7 @@ async fn stream_progress(state: Data::<Server>, transmission: Transmission) -> i
                     }).collect::<Vec::<_>>();
 
                     let json = serde_json::to_string(&data).unwrap();
-                    state.streamer_send(json, mobile).await;
+                    state.streamer_send(json, transmission).await;
                     tokio_sleep(TokioDuration::from_millis(100)).await;
                 }
             })
