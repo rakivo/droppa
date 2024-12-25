@@ -559,7 +559,7 @@ async fn main() -> std::io::Result<()> {
     let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode URL to QR code");
 
     let server = Data::new(Server {
-        qr_bytes: gen_qr_png_bytes(&qr).expect("could not generate QR code image").into()
+        qr_bytes: gen_qr_png_bytes(&qr).expect("could not generate QR code image").into(),
 
         files: Arc::new(Mutex::new(Vec::new())),
         clients: Arc::new(DashMap::new()),
