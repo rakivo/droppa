@@ -195,7 +195,7 @@ struct Server {
 
 impl Server {
     #[inline(always)]
-    fn lock_streamer(&self, transmission: Transmission) -> impl Future::<Output = TokioMutexGuard::<Option::<watch::Sender::<String>>>> {
+    fn lock_streamer(&self, transmission: Transmission) -> impl Future::<Output = TokioMutexGuard::<ProgressStreamer>> {
         use Transmission::*;
         match transmission {
             Mobile  => self.mobile_files_progress_streamer.lock(),
