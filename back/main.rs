@@ -33,6 +33,10 @@ macro_rules! atomic_type {
         #[allow(unused)] type $name = $ty;
         #[allow(unused)] type [<Atomic $name>] = Arc::<TokioMutex::<$ty>>;
     })*};
+    ($(arc.type $name: ident = $ty: ty;)*) => {$(paste::paste! {
+        #[allow(unused)] type $name = $ty;
+        #[allow(unused)] type [<Atomic $name>] = Arc::<$ty>;
+    })*};
 }
 
 macro_rules! lock_fn {
@@ -88,7 +92,9 @@ atomic_type! {
     tokio.type ProgressStreamer = Option::<watch::Sender::<String>>;
 }
 
-type Clients = DashMap::<String, Client>;
+atomic_type! {
+    arc.type Clients = DashMap::<String, Client>;
+}
 
 pub struct File {
     pub size: usize,
@@ -97,7 +103,7 @@ pub struct File {
 }
 
 impl File {
-    async fn from_multipart(multipart: &mut Multipart, clients: Arc::<Clients>, pp: AtomicProgressPinger) -> Result::<File, &'static str> {
+    async fn from_multipart(multipart: &mut Multipart, clients: AtomicClients, pp: AtomicProgressPinger) -> Result::<File, &'static str> {
         let mut size = None;
         let mut bytes = Vec::new();
         let mut name = String::new();
@@ -183,7 +189,7 @@ struct Server {
     qr_bytes: web::Bytes,
 
     files: AtomicFiles,
-    clients: Arc::<Clients>,
+    clients: AtomicClients,
 
     files_progress_pinger: AtomicProgressPinger,
 
