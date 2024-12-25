@@ -1,6 +1,102 @@
 let globalFiles = [];
 
-let downloadFiles = [];
+let downloadFiles = new Map();
+
+let eventSource = null;
+
+function connectSSE() {
+  if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
+    console.log("SSE connection already active");
+    return;
+  }
+
+  console.log("Establishing SSE connection...");
+
+  eventSource = new EventSource("/download-files-progress-mobile");
+
+  eventSource.onopen = () => {
+    console.log("SSE connection established");
+  };
+
+  eventSource.onmessage = (event) => {
+    console.log("Received SSE message:", event.data);
+    if (event.data === "CONNECTION_REPLACED") {
+      console.log("Connection replaced by the server.");
+      eventSource.close();
+      return;
+    }
+
+    const eventData = JSON.parse(event.data);
+
+    console.log(downloadFiles);
+    console.log(eventData);
+
+    eventData.forEach((messageFile) => {
+      if (!downloadFiles.has(messageFile.name)) {
+        downloadFiles.set(messageFile.name, messageFile);
+      }
+    });
+
+    eventData.forEach((messageFile) => {
+      if (downloadFiles.has(messageFile.name)) {
+        const hashFile = downloadFiles.get(messageFile.name);
+        hashFile.progress = messageFile.progress;
+        watchDownloadFileProgress(hashFile);
+      }
+    });
+  };
+
+  eventSource.onerror = (error) => {
+    console.error("SSE connection error:", error);
+    // Close the connection to avoid endless reconnect attempts
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+      setTimeout(() => connectSSE(), 2500);
+    }
+  };
+}
+
+function watchDownloadFileProgress(downloadFileObject) {
+  console.log(downloadFileObject);
+  /*   if (downloadFileObject.status == "success") {
+    return downloadFileObject;
+  } */
+  if (!downloadFileObject.domCreated) {
+    const { message, fileNameSpan, messageStatusDiv } = createMessage(
+      downloadFileObject,
+      "download"
+    );
+
+    downloadFileObject.message = message;
+    downloadFileObject.fileNameSpan = fileNameSpan;
+    downloadFileObject.messageStatusDiv = messageStatusDiv;
+    downloadFileObject.domCreated = true;
+    downloadFileObject.status = "progress";
+
+    downloadFileObject.message.className = "status-message progress";
+  }
+  downloadFileObject.messageStatusDiv.textContent = ` ${downloadFileObject.progress}%`;
+
+  if (downloadFileObject.progress == 100) {
+    downloadFileObject.status = "success";
+    downloadFileObject.messageStatusDiv.textContent = `SUCCESS`;
+    downloadFileObject.message.className = "status-message success";
+  }
+  console.log(downloadFileObject);
+  return downloadFileObject;
+}
+
+window.addEventListener("beforeunload", () => {
+  if (eventSource) {
+    console.log("Closing SSE connection on unload");
+    eventSource.close();
+  }
+});
+
+window.addEventListener("load", () => {
+  connectSSE();
+});
 
 document.getElementById("drag_and_drop-menu").addEventListener("click", () => {
   document.getElementById("file-input").click();
@@ -167,14 +263,21 @@ document
         messageStatusDiv: messageStatusDiv,
       };
 
-      downloadFiles.push(file);
-
       trackProgress(eventSource, fullFileObject);
 
       const response = await fetch("/download-files-mobile");
 
       const contentLength = response.headers.get("Content-Length");
       const total = contentLength ? parseInt(contentLength, 10) : 0;
+
+      file.size = total;
+
+      downloadFiles.set(file.name, {
+        "name": file.name,
+        "size": file.size.toString(),
+        "progress": "0",
+      });
+
       let loaded = 0;
 
       const reader = response.body.getReader();
@@ -194,6 +297,9 @@ document
 
         // Calculate progress
         const progress = total ? Math.floor((loaded / total) * 100) : 0;
+
+        downloadFiles.get(file.name).progress = progress.toString();
+
         fullFileObject.message.className = "status-message progress";
 
         fullFileObject.messageStatusDiv.textContent = ` PREP ${progress}%`;
