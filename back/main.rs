@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 use std::future::Future;
 use std::net::{IpAddr, UdpSocket};
 use std::io::{Cursor, Write, BufWriter};
@@ -53,8 +54,12 @@ const PORT: u16 = 6969;
 const GIG: usize = 1024 * 1024 * 1024;
 const SIZE_LIMIT: usize = GIG * 1;
 
-const HOME_MOBILE_HTML:    &[u8] = include_bytes!("../front/index-mobile.html");
-const HOME_DESKTOP_HTML:   &[u8] = include_bytes!("../front/index-desktop.html");
+const DELIM: &str = if cfg!(windows) { "\\" } else { "/" };
+
+const DROPPA_DOWNLOADS_DIR: &str = "droppa_files";
+
+const HOME_MOBILE_HTML:  &[u8] = include_bytes!("../front/index-mobile.html");
+const HOME_DESKTOP_HTML: &[u8] = include_bytes!("../front/index-desktop.html");
 
 #[derive(Debug, Serialize)]
 pub struct TrackFile {
@@ -181,6 +186,8 @@ enum Transmission { Mobile, Zipping, Desktop }
 struct Server {
     qr_bytes: web::Bytes,
 
+    downloads_dir: PathBuf,
+
     files: AtomicFiles,
     clients: AtomicClients,
 
@@ -306,12 +313,17 @@ async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl 
     #[cfg(feature = "dbg")] { name = name + ".test" }
 
     if let Err(e) = actix_rt::task::spawn_blocking(move || {
-        let file = match fs::File::create(&name) {
+        let file_path = format!{
+            "{downloads}{DELIM}{name}",
+            downloads = state.downloads_dir.display()
+        };
+
+        let file = match fs::File::create(&file_path) {
             Ok(f) => f,
             Err(e) => return Err(format!("could not create file: {name}: {e}"))
         };
 
-        println!("[INFO] copying bytes to: {name}..");
+        println!("[INFO] copying bytes to: {file_path}..");
 
         let mut wbuf = BufWriter::with_capacity(size, file);
         if let Err(e) = wbuf.write_all(&bytes) {
@@ -542,6 +554,17 @@ async fn main() -> std::io::Result<()> {
 
     let server = Data::new(Server {
         qr_bytes: gen_qr_png_bytes(&qr).expect("could not generate QR code image").into(),
+
+        downloads_dir: {
+            let mut dir = dirs::download_dir().expect("could not get user's `Downloads` directory");
+            dir.push(DROPPA_DOWNLOADS_DIR);
+
+            if !dir.exists() {
+                fs::create_dir(&dir).expect("could not create `droppa` downloads sub-directory")
+            }
+
+            dir
+        },
 
         files: Arc::new(Mutex::new(Vec::new())),
         clients: Arc::new(DashMap::new()),

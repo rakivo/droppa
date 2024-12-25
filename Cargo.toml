@@ -11,6 +11,7 @@ path = "back/main.rs"
 dbg = []
 
 [dependencies]
+dirs            = { version = "=5.0.1", default-features = false }
 paste           = { version = "=1.0.15",  default-features = false                         }
 qrcodegen       = { version = "=1.8.0",   default-features = false                         }
 serde_json      = { version = "=1.0.133", default-features = false                         }
