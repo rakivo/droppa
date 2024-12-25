@@ -1,9 +1,8 @@
 use std::fs;
-
 use std::future::Future;
 use std::net::{IpAddr, UdpSocket};
 use std::io::{Cursor, Write, BufWriter};
-use std::sync::{Arc, Mutex, MutexGuard, atomic::{Ordering, AtomicUsize}};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
 use dashmap::DashMap;
@@ -29,6 +28,10 @@ macro_rules! atomic_type {
     ($(type $name: ident = $ty: ty;)*) => {$(paste::paste! {
         #[allow(unused)] type $name = $ty;
         #[allow(unused)] type [<Atomic $name>] = Arc::<Mutex::<$ty>>;
+    })*};
+    ($(tokio.type $name: ident = $ty: ty;)*) => {$(paste::paste! {
+        #[allow(unused)] type $name = $ty;
+        #[allow(unused)] type [<Atomic $name>] = Arc::<TokioMutex::<$ty>>;
     })*};
 }
 
@@ -61,10 +64,6 @@ const SIZE_LIMIT: usize = GIG * 1;
 const HOME_MOBILE_HTML:    &[u8] = include_bytes!("../front/index-mobile.html");
 const HOME_DESKTOP_HTML:   &[u8] = include_bytes!("../front/index-desktop.html");
 
-atomic_type! {
-    type Files = Vec::<File>;
-}
-
 #[derive(Debug, Serialize)]
 pub struct TrackFile {
     pub size: usize,
@@ -79,9 +78,15 @@ pub struct Client {
     size: usize,
 }
 
-type SyncProgressSender = Arc::<Mutex::<Option::<mpsc::Sender::<u8>>>>;
-type ProgressPinger = Arc::<TokioMutex::<Option::<mpsc::Sender::<()>>>>;
-type ProgressStreamer = Arc::<TokioMutex::<Option::<watch::Sender::<String>>>>;
+atomic_type! {
+    type Files = Vec::<File>;
+    type SyncProgressSender = Option::<mpsc::Sender::<u8>>;
+}
+
+atomic_type! {
+    tokio.type ProgressPinger = Option::<mpsc::Sender::<()>>;
+    tokio.type ProgressStreamer = Option::<watch::Sender::<String>>;
+}
 
 type Clients = DashMap::<String, Client>;
 
@@ -92,7 +97,7 @@ pub struct File {
 }
 
 impl File {
-    async fn from_multipart(multipart: &mut Multipart, clients: Arc::<Clients>, pp: ProgressPinger) -> Result::<File, &'static str> {
+    async fn from_multipart(multipart: &mut Multipart, clients: Arc::<Clients>, pp: AtomicProgressPinger) -> Result::<File, &'static str> {
         let mut size = None;
         let mut bytes = Vec::new();
         let mut name = String::new();
@@ -112,8 +117,9 @@ impl File {
                 }
 
                 let size = unsafe { size.unwrap_unchecked() };
-                if bytes.try_reserve_exact(size / std::mem::size_of::<u8>()).is_err() {
-                    println!("[FATAL] could not reserve memory: {}", size / std::mem::size_of::<u8>());
+                let u8_reserve = size / std::mem::size_of::<u8>();
+                if bytes.try_reserve_exact(size / u8_reserve).is_err() {
+                    println!("[FATAL] could not reserve memory: {u8_reserve}");
                     return Err("could not reserve memory")
                 }
 
@@ -174,14 +180,18 @@ impl File {
 }
 
 struct Server {
-    files: AtomicFiles,
     qr_bytes: web::Bytes,
+
+    files: AtomicFiles,
     clients: Arc::<Clients>,
-    files_progress_pinger: ProgressPinger,
-    zipping_progress_sender: SyncProgressSender,
-    zipping_progress_streamer: ProgressStreamer,
-    mobile_files_progress_streamer: ProgressStreamer,
-    desktop_files_progress_streamer: ProgressStreamer
+
+    files_progress_pinger: AtomicProgressPinger,
+
+    zipping_progress_sender: AtomicSyncProgressSender,
+
+    zipping_progress_streamer: AtomicProgressStreamer,
+    mobile_files_progress_streamer: AtomicProgressStreamer,
+    desktop_files_progress_streamer: AtomicProgressStreamer
 }
 
 impl Server {
@@ -326,37 +336,36 @@ async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl 
 
 struct ProgressTracker<W: Write> {
     writer: W,
+    written: usize,
     total_size: usize,
-    written: AtomicUsize,
-    progress_sender: SyncProgressSender
+    progress_sender: AtomicSyncProgressSender
 }
 
 impl<W: Write> ProgressTracker::<W> {
     #[inline]
-    pub fn new(writer: W, total_size: usize, progress_sender: SyncProgressSender) -> Self {
+    pub fn new(writer: W, total_size: usize, progress_sender: AtomicSyncProgressSender) -> Self {
         Self {
             writer,
+            written: 0,
             total_size,
-            progress_sender,
-            written: AtomicUsize::new(0),
+            progress_sender
         }
     }
 
     #[inline]
     pub fn progress(&self) -> u64 {
-        let written = self.written.load(Ordering::Relaxed);
-        if written >= self.total_size - 1 {
+        if self.written >= self.total_size - 1 {
             100
         } else {
-            (written * 100 / self.total_size).min(100) as _
+            (self.written * 100 / self.total_size).min(100) as _
         }
     }
 }
 
 impl<W: Write> Write for ProgressTracker::<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result::<usize> {
-        let written = self.writer.write(buf)?;
-        self.written.fetch_add(written, Ordering::Relaxed);
+        let written_ = self.writer.write(buf)?;
+        self.written += written_;
 
         let p = self.progress();
         if p % 5 == 0 {
@@ -364,7 +373,7 @@ impl<W: Write> Write for ProgressTracker::<W> {
             progress_sender.as_ref().map(|ps| ps.try_send(p as _));
         }
 
-        Ok(written)
+        Ok(written_)
     }
 
     #[inline(always)]
@@ -550,14 +559,18 @@ async fn main() -> std::io::Result<()> {
     let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode URL to QR code");
 
     let server = Data::new(Server {
-        clients: Arc::new(DashMap::new()),
+        qr_bytes: gen_qr_png_bytes(&qr).expect("could not generate QR code image").into()
+
         files: Arc::new(Mutex::new(Vec::new())),
-        zipping_progress_sender: Arc::new(Mutex::new(None)),
+        clients: Arc::new(DashMap::new()),
+
         files_progress_pinger: Arc::new(TokioMutex::new(None)),
+
+        zipping_progress_sender: Arc::new(Mutex::new(None)),
+
         zipping_progress_streamer: Arc::new(TokioMutex::new(None)),
         mobile_files_progress_streamer: Arc::new(TokioMutex::new(None)),
         desktop_files_progress_streamer: Arc::new(TokioMutex::new(None)),
-        qr_bytes: gen_qr_png_bytes(&qr).expect("could not generate QR code image").into()
     });
 
     println!("[INFO] serving at: <http://{local_ip}:{PORT}>");
