@@ -62,9 +62,71 @@ window.addEventListener("beforeunload", () => {
     console.log("Closing SSE connection on unload");
     eventSource.close();
   }
+
+  if (downloadFiles.length) {
+    const downloadFiles_ = filter(f => f.status === "success").map(fileObject => {
+      return {
+        "file": {
+          "name": fileObject.file.name,
+          "size": fileObject.file.size,
+        },
+        "status": "success",
+      };
+    });
+    localStorage.setItem('downloadFiles', JSON.stringify(downloadFiles_));
+  } else {
+    localStorage.setItem('downloadFiles', "[]");
+  }
+
+  if (globalFiles.length) {
+    const globalFiles_ = globalFiles.filter(f => f.status === "success").map(fileObject => {
+      return {
+        "file": {
+          "name": fileObject.file.name,
+          "size": fileObject.file.size,
+        },
+        "status": "success",
+      };
+    });
+    localStorage.setItem('globalFiles', JSON.stringify(globalFiles_));
+  } else {
+    localStorage.setItem('globalFiles', "[]");
+  }
 });
 
 window.addEventListener("load", () => {
+  const downloadFiles_ = localStorage.getItem('downloadFiles');
+  if (downloadFiles_) {
+    const downloadFilesArray = JSON.parse(downloadFiles_);
+    console.log(downloadFilesArray);
+    downloadFilesArray.forEach(fileObject => {
+      downloadsFiles.set(fileObject.file.name, fileObject);
+    });
+  }
+
+  const globalFiles_ = localStorage.getItem('globalFiles');
+  if (globalFiles_) {
+    const globalFilesArray = JSON.parse(globalFiles_);
+    globalFilesArray.forEach(fileObject => {
+      if (fileObject.status === "success") {
+        console.log(fileObject.file);
+        const { message, fileNameSpan, messageStatusDiv } = createMessage(
+          fileObject.file,
+          "upload"
+        );
+
+        messageStatusDiv.textContent = `SUCCESS`;
+        message.className = "status-message success";
+
+        fileObject.message = message;
+        fileObject.fileNameSpan = fileNameSpan;
+        fileObject.messageStatusDiv = messageStatusDiv;
+
+        globalFiles.push(fileObject);
+      }
+    });
+  }
+
   connectSSE();
 
   const qrcodeContainer = document.getElementById("qrcode-container");

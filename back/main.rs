@@ -125,14 +125,14 @@ impl File {
                 println!("[INFO] parsed file size: {size}");
 
                 if size > SIZE_LIMIT {
-                    #[cfg(feature = "dbg")] println!("file size exceeds limit, returning bad request..");
+                    println!("[ERROR] file size exceeds limit, returning bad request..");
                     return Err("file size exceeds limit, returning bad request..")
                 }
             } else {
                 println!("[INFO] processing `file` field...");
 
                 let Some(size) = size else {
-                    println!("`size` field must go first, not the `file` one");
+                    println!("[ERROR] `size` field must go first, not the `file` one");
                     return Err("`size` field must go first, not the `file` one")
                 };
 
@@ -147,8 +147,6 @@ impl File {
                     bytes.extend_from_slice(&chunk);
                     let progress = (bytes.len() * 100 / size).min(100) as u8;
                     if progress % 5 == 0 {
-                        println!("[INFO {name}] copying chunk..");
-
                         let Some(mut ps) = clients.get_mut(name) else {
                             println!("[ERROR] no: {name} in the clients hashmap, returning an error..");
                             return Err(MultipartError::Incomplete)
@@ -160,8 +158,6 @@ impl File {
                         if let Err(e) = ps.sender.send(progress) {
                             eprintln!("[ERROR] failed to send progress: {e}");
                         }
-
-                        println!("[INFO {name}] copied chunk, trying to lock the pinger..");
 
                         if let Ok(pp) = pp.try_lock() {
                             if let Some(pp) = pp.as_ref() {
@@ -451,7 +447,7 @@ async fn stream_progress(state: Data::<Server>, transmission: Transmission) -> i
     {
         let progress_streamer = &mut state.lock_streamer(transmission).await;
         if progress_streamer.is_some() {
-            progress_streamer.as_ref().unwrap().send("CONNECTION_REPLACED".to_owned()).unwrap();
+            _ = progress_streamer.as_ref().unwrap().send("CONNECTION_REPLACED".to_owned());
             **progress_streamer = Some(ptx);
             return HttpResponse::Ok()
                 .append_header(("Content-Type", "text/event-stream"))
@@ -502,6 +498,7 @@ async fn stream_progress(state: Data::<Server>, transmission: Transmission) -> i
                     }).collect::<Vec::<_>>();
 
                     let json = serde_json::to_string(&data).unwrap();
+                    println!("SENDING {json}");
 
                     state.streamer_send(json, transmission).await;
                     tokio_sleep(TokioDuration::from_millis(100)).await;
@@ -560,9 +557,7 @@ async fn main() -> std::io::Result<()> {
 
             if !dir.exists() {
                 fs::create_dir(&dir).expect("could not create `droppa` downloads sub-directory")
-            }
-
-            dir
+            } dir
         },
 
         files: Arc::new(Mutex::new(Vec::new())),
