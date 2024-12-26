@@ -61,20 +61,6 @@ const DROPPA_DOWNLOADS_DIR: &str = "droppa_files";
 const HOME_MOBILE_HTML:  &[u8] = include_bytes!("../front/index-mobile.html");
 const HOME_DESKTOP_HTML: &[u8] = include_bytes!("../front/index-desktop.html");
 
-#[derive(Debug, Serialize)]
-pub struct TrackFile {
-    pub size: usize,
-    pub name: String,
-    pub progress: u8
-}
-
-pub struct Client {
-    sender: watch::Sender::<u8>,
-    progress: u8,
-    mobile: bool,
-    size: usize,
-}
-
 atomic_type! {
     type Files = Vec::<File>;
     type SyncProgressSender = Option::<mpsc::Sender::<u8>>;
@@ -89,10 +75,24 @@ atomic_type! {
     arc.type Clients = DashMap::<String, Client>;
 }
 
-pub struct File {
+#[derive(Serialize)]
+pub struct TrackFile {
     pub size: usize,
     pub name: String,
-    pub bytes: Vec::<u8>
+    pub progress: u8
+}
+
+pub struct Client {
+    sender: watch::Sender::<u8>,
+    progress: u8,
+    mobile: bool,
+    size: usize,
+}
+
+pub struct File {
+    size: usize,
+    name: String,
+    bytes: Vec::<u8>
 }
 
 impl File {
@@ -256,9 +256,9 @@ async fn track_progress(rq: HttpRequest, path: Path::<String>, state: Data::<Ser
     });
 
     HttpResponse::Ok()
-        .append_header(("Content-Type", "text/event-stream"))
+        .keep_alive()
+        .content_type("text/event-stream")
         .append_header(("Cache-Control", "no-cache"))
-        .append_header(("Connection", "keep-alive"))
         .streaming(rx.map(|data| {
             Ok::<_, actix_web::Error>(format!("data: {{ \"progress\": {data} }}\n\n").into())
         }))
@@ -271,7 +271,7 @@ async fn index(rq: HttpRequest) -> impl Responder {
     };
 
     HttpResponse::Ok()
-        .append_header(("Content-Type", "text/html"))
+        .content_type("text/html")
         .body(if user_agent_is_mobile(user_agent) {HOME_MOBILE_HTML} else {HOME_DESKTOP_HTML}) 
 }
 
@@ -365,16 +365,14 @@ impl<W: Write> ProgressTracker::<W> {
 
 impl<W: Write> Write for ProgressTracker::<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result::<usize> {
-        let written_ = self.writer.write(buf)?;
-        self.written += written_;
+        let written = self.writer.write(buf)?;
+        self.written += written;
 
         let p = self.progress();
         if p % 5 == 0 {
             let progress_sender = self.progress_sender.lock().unwrap();
             progress_sender.as_ref().map(|ps| ps.try_send(p as _));
-        }
-
-        Ok(written_)
+        } Ok(written)
     }
 
     #[inline(always)]
@@ -445,8 +443,6 @@ async fn download_files(state: Data::<Server>) -> impl Responder {
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 async fn stream_progress(state: Data::<Server>, transmission: Transmission) -> impl Responder {
-    use Transmission::*;
-
     let ptx = watch::channel("[]".to_owned()).0;
     let streamer = WatchStream::new(ptx.subscribe());
 
@@ -467,49 +463,46 @@ async fn stream_progress(state: Data::<Server>, transmission: Transmission) -> i
         **progress_streamer = Some(ptx)
     }
 
-    match transmission {
-        Zipping => {
-            let (tx, mut rx) = mpsc::channel(8);
-            *state.zipping_progress_sender.lock().unwrap() = Some(tx);
+    if matches!(transmission, Transmission::Zipping) {
+        let (tx, mut rx) = mpsc::channel(8);
+        *state.zipping_progress_sender.lock().unwrap() = Some(tx);
 
-            let state = Data::clone(&state);
-            actix_rt::spawn(async move {
-                loop {
-                    if let Ok(progress) = rx.try_recv() {
-                        let streamer = state.zipping_progress_streamer.lock().await;
-                        let streamer = streamer.as_ref().unwrap();
-                        _ = streamer.send(format!("{{ \"progress\": {progress} }}"));
-                        tokio_sleep(TokioDuration::from_millis(100)).await
-                    } else {
-                        tokio_sleep(TokioDuration::from_millis(150)).await
-                    }
+        let state = Data::clone(&state);
+        actix_rt::spawn(async move {
+            loop {
+                if let Ok(progress) = rx.try_recv() {
+                    let streamer = state.zipping_progress_streamer.lock().await;
+                    let streamer = streamer.as_ref().unwrap();
+                    _ = streamer.send(format!("{{ \"progress\": {progress} }}"));
+                    tokio_sleep(TokioDuration::from_millis(100)).await
+                } else {
+                    tokio_sleep(TokioDuration::from_millis(150)).await
                 }
-            })
-        }
-        _ => {
-            let (tx, mut rx) = mpsc::channel(8);
-            *state.files_progress_pinger.lock().await = Some(tx);
+            }
+        });
+    } else {
+        let (tx, mut rx) = mpsc::channel(8);
+        *state.files_progress_pinger.lock().await = Some(tx);
 
-            let state = Data::clone(&state);
-            actix_rt::spawn(async move {
-                loop {
-                    if rx.try_recv().is_err() {
-                        tokio_sleep(TokioDuration::from_millis(150)).await;
-                        continue
-                    }
-
-                    let mobile = matches!(transmission, Mobile);
-                    let data = state.clients.iter().filter(|p| p.mobile != mobile).map(|p| {
-                        TrackFile { name: p.key().to_owned(), progress: p.progress, size: p.size }
-                    }).collect::<Vec::<_>>();
-
-                    let json = serde_json::to_string(&data).unwrap();
-                    state.streamer_send(json, transmission).await;
-                    tokio_sleep(TokioDuration::from_millis(100)).await;
+        let state = Data::clone(&state);
+        actix_rt::spawn(async move {
+            loop {
+                if rx.try_recv().is_err() {
+                    tokio_sleep(TokioDuration::from_millis(150)).await;
+                    continue
                 }
-            })
-        }
-    };
+
+                let mobile = matches!(transmission, Transmission::Mobile);
+                let data = state.clients.iter().filter(|p| p.mobile != mobile).map(|p| {
+                    TrackFile { name: p.key().to_owned(), progress: p.progress, size: p.size }
+                }).collect::<Vec::<_>>();
+
+                let json = serde_json::to_string(&data).unwrap();
+                state.streamer_send(json, transmission).await;
+                tokio_sleep(TokioDuration::from_millis(100)).await;
+            }
+        });
+    }
 
     HttpResponse::Ok()
         .append_header(("Content-Type", "text/event-stream"))
@@ -558,12 +551,9 @@ async fn main() -> std::io::Result<()> {
         downloads_dir: {
             let mut dir = dirs::download_dir().expect("could not get user's `Downloads` directory");
             dir.push(DROPPA_DOWNLOADS_DIR);
-
             if !dir.exists() {
                 fs::create_dir(&dir).expect("could not create `droppa` downloads sub-directory")
-            }
-
-            dir
+            } dir
         },
 
         files: Arc::new(Mutex::new(Vec::new())),
