@@ -1,45 +1,61 @@
 function uuidv4() {
-  return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, c =>
-    (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> +c / 4).toString(16)
+  const uuid = "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
+    (
+      +c ^
+      (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (+c / 4)))
+    ).toString(16)
   );
+  localStorage.setItem("uuid", JSON.stringify(uuid));
+  return uuid;
 }
 
-let uuid = uuidv4();
+let uuid = localStorage.getItem("uuid")
+  ? JSON.parse(localStorage.getItem("uuid"))
+  : uuidv4();
 let deviceName = `${getDeviceType()}-${uuid}`;
 
 let connected = new Map();
 
-const deviceSelectorSelect = document.getElementById('deviceSelectorSelect');
-const deviceSelectorConnectButton = document.getElementById('deviceSelectorConnectButton');
-const deviceSelectorStatusMessage = document.getElementById('deviceSelectorStatusMessage');
+const deviceSelectorSelect = document.getElementById("deviceSelectorSelect");
+const deviceSelectorConnectButton = document.getElementById(
+  "deviceSelectorConnectButton"
+);
+const deviceSelectorStatusMessage = document.getElementById(
+  "deviceSelectorStatusMessage"
+);
 
 // Handle device selection and enable the connect button
-deviceSelectorSelect.addEventListener('change', () => {
+deviceSelectorSelect.addEventListener("change", () => {
   const selectedDevice = deviceSelectorSelect.value;
   if (selectedDevice) {
     deviceSelectorConnectButton.disabled = false;
-    deviceSelectorStatusMessage.textContent = '';
+    deviceSelectorStatusMessage.textContent = "";
   }
 });
 
 // Send the connection request
-deviceSelectorConnectButton.addEventListener('click', async () => {
+deviceSelectorConnectButton.addEventListener("click", async () => {
   const deviceName = deviceSelectorSelect.value;
-  const to = 'someOtherDeviceName'; // You can replace this with the target device if needed
+  const to = "someOtherDeviceName"; // You can replace this with the target device if needed
 
   try {
-    const response = await fetch(`/connect?deviceName=${encodeURIComponent(deviceName)}&to=${encodeURIComponent(to)}`, {
-      method: 'GET'
-    });
+    const response = await fetch(
+      `/connect?deviceName=${encodeURIComponent(
+        deviceName
+      )}&to=${encodeURIComponent(to)}`,
+      {
+        method: "GET",
+      }
+    );
 
     if (response.ok) {
       deviceSelectorStatusMessage.textContent = `Connected to ${deviceName}`;
     } else {
-      deviceSelectorStatusMessage.textContent = 'Failed to connect to device.';
+      deviceSelectorStatusMessage.textContent = "Failed to connect to device.";
     }
   } catch (error) {
-    console.error('Error connecting to device:', error);
-    deviceSelectorStatusMessage.textContent = 'Error connecting to device.';
+    console.error("Error connecting to device:", error);
+    deviceSelectorStatusMessage.textContent = "Error connecting to device.";
   }
 });
 
@@ -51,18 +67,21 @@ let eventSource = null;
 let devicesEventSource = null;
 
 function connectDevicesSSE() {
-  if (devicesEventSource && devicesEventSource.readyState !== EventSource.CLOSED) {
+  if (
+    devicesEventSource &&
+    devicesEventSource.readyState !== EventSource.CLOSED
+  ) {
     console.log("SSE connection already active");
     return;
   }
 
   console.log("Establishing SSE connection...");
 
-  devicesEventSource = new EventSource('/connected-devices');
+  devicesEventSource = new EventSource("/connected-devices");
 
   devicesEventSource.onopen = () => {
     console.log("SSE connection established");
-    deviceSelectorStatusMessage.textContent = '';
+    deviceSelectorStatusMessage.textContent = "";
   };
 
   devicesEventSource.onmessage = (event) => {
@@ -79,7 +98,7 @@ function connectDevicesSSE() {
 
         connected.forEach((domCreated, deviceName) => {
           if (!domCreated) {
-            const option = document.createElement('option');
+            const option = document.createElement("option");
             option.value = deviceName;
             option.textContent = deviceName;
             deviceSelectorSelect.appendChild(option);
@@ -87,7 +106,7 @@ function connectDevicesSSE() {
           }
         });
       } else {
-        deviceSelectorStatusMessage.textContent = 'No connected devices found.';
+        deviceSelectorStatusMessage.textContent = "No connected devices found.";
       }
     } catch (error) {
       console.error("Error processing SSE message:", error);
@@ -96,7 +115,7 @@ function connectDevicesSSE() {
 
   devicesEventSource.onerror = (error) => {
     console.error("SSE connection error:", error);
-    deviceSelectorStatusMessage.textContent = 'Failed to load devices.';
+    deviceSelectorStatusMessage.textContent = "Failed to load devices.";
     // Close the connection and retry after a delay
     if (devicesEventSource) {
       devicesEventSource.close();
@@ -172,7 +191,7 @@ window.addEventListener("load", async () => {
   let deviceName_ = encodeURIComponent(deviceName);
   let uuid_ = encodeURIComponent(uuid);
   await fetch(`init-device?deviceName=${deviceName_}&uuid=${uuid_}`, {
-    method: "POST"
+    method: "POST",
   });
 
   connectSSE();
@@ -206,28 +225,34 @@ function getDeviceType() {
   return /Mobi|Android/i.test(ua) ? "MOBILE" : "DESKTOP";
 }
 
-document.getElementById("device-form").addEventListener("submit", async function (e) {
-  e.preventDefault();
+document
+  .getElementById("device-form")
+  .addEventListener("submit", async function (e) {
+    e.preventDefault();
 
-  const customName = document.getElementById("device-name").value.trim();
-  const deviceType = getDeviceType();
-  const fullDeviceName = `${deviceType}-${customName}`;
-  const resultDiv = document.getElementById("device-result");
-  resultDiv.textContent = `Device Name: ${fullDeviceName}`;
-  resultDiv.classList.remove("device-hidden");
+    const customName = document.getElementById("device-name").value.trim();
+    const deviceType = getDeviceType();
+    const fullDeviceName = `${deviceType}-${customName}`;
+    const resultDiv = document.getElementById("device-result");
+    resultDiv.textContent = `Device Name: ${fullDeviceName}`;
+    resultDiv.classList.remove("device-hidden");
 
-  let deviceName_ = encodeURIComponent(deviceName);
-  let uuid_ = encodeURIComponent(uuid);
-  await fetch(`uninit-device?deviceName=${deviceName_}&uuid=${uuid_}`, {method: "POST"});
+    let deviceName_ = encodeURIComponent(deviceName);
+    let uuid_ = encodeURIComponent(uuid);
+    await fetch(`uninit-device?deviceName=${deviceName_}&uuid=${uuid_}`, {
+      method: "POST",
+    });
 
-  connected.delete(deviceName);
-  deviceName = fullDeviceName;
-  connected.set(deviceName, true);
-  
-  deviceName_ = encodeURIComponent(deviceName);
-  uuid_ = encodeURIComponent(uuid);
-  await fetch(`init-device?deviceName=${deviceName_}&uuid=${uuid_}`, {method: "POST"});
-});
+    connected.delete(deviceName);
+    deviceName = fullDeviceName;
+    connected.set(deviceName, true);
+
+    deviceName_ = encodeURIComponent(deviceName);
+    uuid_ = encodeURIComponent(uuid);
+    await fetch(`init-device?deviceName=${deviceName_}&uuid=${uuid_}`, {
+      method: "POST",
+    });
+  });
 
 document.getElementById("drag_and_drop-menu").addEventListener("click", () => {
   document.getElementById("file-input").click();
@@ -407,10 +432,13 @@ async function uploadFile(fileObject) {
 
     console.log("Sending upload request...");
 
-    const response = await fetch(`/upload-desktop?uuid=${encodeURIComponent(uuid)}`, {
-      method: "POST",
-      body: formData,
-    });
+    const response = await fetch(
+      `/upload-desktop?uuid=${encodeURIComponent(uuid)}`,
+      {
+        method: "POST",
+        body: formData,
+      }
+    );
 
     if (!response.ok) {
       const errorText = await response.text();

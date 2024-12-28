@@ -4,12 +4,19 @@ function getDeviceType() {
 }
 
 function uuidv4() {
-  return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, c =>
-    (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> +c / 4).toString(16)
+  const uuid = "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
+    (
+      +c ^
+      (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (+c / 4)))
+    ).toString(16)
   );
+  localStorage.setItem("uuid", JSON.stringify(uuid));
+  return uuid;
 }
 
-let uuid = uuidv4();
+let uuid = localStorage.getItem("uuid")
+  ? JSON.parse(localStorage.getItem("uuid"))
+  : uuidv4();
 let deviceName = `${getDeviceType()}-${uuid}`;
 
 let connected = new Map();
@@ -22,14 +29,17 @@ let eventSource = null;
 let devicesEventSource = null;
 
 function connectDevicesSSE() {
-  if (devicesEventSource && devicesEventSource.readyState !== EventSource.CLOSED) {
+  if (
+    devicesEventSource &&
+    devicesEventSource.readyState !== EventSource.CLOSED
+  ) {
     console.log("SSE connection already active");
     return;
   }
 
   console.log("Establishing SSE connection...");
 
-  devicesEventSource = new EventSource('/connected-devices');
+  devicesEventSource = new EventSource("/connected-devices");
 
   devicesEventSource.onopen = () => {
     console.log("SSE connection established");
@@ -49,7 +59,7 @@ function connectDevicesSSE() {
 
         connected.forEach((domCreated, deviceName) => {
           if (!domCreated) {
-            const option = document.createElement('option');
+            const option = document.createElement("option");
             option.value = deviceName;
             option.textContent = deviceName;
             connected.set(deviceName, true);
@@ -165,9 +175,14 @@ window.addEventListener("beforeunload", () => {
 window.addEventListener("load", async () => {
   connectDevicesSSE();
 
-  await fetch(`init-device?deviceName=${encodeURIComponent(deviceName)}&uuid=${encodeURIComponent(uuid)}`, {
-    method: "POST"
-  });
+  await fetch(
+    `init-device?deviceName=${encodeURIComponent(
+      deviceName
+    )}&uuid=${encodeURIComponent(uuid)}`,
+    {
+      method: "POST",
+    }
+  );
 
   connectSSE();
 });
@@ -278,10 +293,7 @@ async function openZipProgressConnection() {
     };
 
     eventSource.onerror = (error) => {
-      console.error(
-        `Error on opening progress connection for zip`,
-        error
-      );
+      console.error(`Error on opening progress connection for zip`, error);
       eventSource.close();
       reject(new Error(` zip FAILURE`));
     };
@@ -321,7 +333,7 @@ document
 
       const file = {
         name: getZipFileName(),
-        size: 69
+        size: 69,
       };
 
       const { message, fileNameSpan, messageStatusDiv } = createMessage(
@@ -347,9 +359,9 @@ document
       file.size = total;
 
       downloadFiles.set(file.name, {
-        "name": file.name,
-        "size": file.size.toString(),
-        "progress": "0",
+        name: file.name,
+        size: file.size.toString(),
+        progress: "0",
       });
 
       let loaded = 0;
@@ -450,10 +462,13 @@ async function uploadFile(fileObject) {
     trackProgress(eventSource, fileObject);
 
     console.log("Sending upload request...");
-    const response = await fetch(`/upload-mobile?uuid=${encodeURIComponent(uuid)}`, {
-      method: "POST",
-      body: formData,
-    });
+    const response = await fetch(
+      `/upload-mobile?uuid=${encodeURIComponent(uuid)}`,
+      {
+        method: "POST",
+        body: formData,
+      }
+    );
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -474,7 +489,9 @@ async function uploadFile(fileObject) {
 
 async function openProgressConnection(file) {
   return new Promise((resolve, reject) => {
-    const eventSource = new EventSource(`/progress/${file.name}?uuid=${encodeURIComponent(uuid)}`);
+    const eventSource = new EventSource(
+      `/progress/${file.name}?uuid=${encodeURIComponent(uuid)}`
+    );
 
     eventSource.onopen = () => {
       console.log(`Progress connection for ${file.name} established.`);
