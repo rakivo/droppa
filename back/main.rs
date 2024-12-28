@@ -318,7 +318,7 @@ async fn upload_desktop(state: Data::<Server>, mut multipart: Multipart, query: 
 }
 
 #[post("/upload-mobile")]
-async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>, query: Query::<Uuid>) -> impl Responder {
+async fn upload_mobile(state: Data::<Server>, mut multipart: Multipart, query: Query::<Uuid>) -> impl Responder {
     println!("[INFO] upload-mobile requested, parsing multipart..");
 
     let File { bytes, name, size } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients), Arc::clone(&state.files_progress_pinger)).await {
@@ -578,7 +578,7 @@ async fn connected_devices(state: Data::<Server>) -> impl Responder {
         loop {
             if rx.try_recv().is_ok() {
                 let streamer = state.connected_devices_streamer.lock().await;
-                let connected = state.connected.iter().map(|s| Box::clone(&*s)).collect::<Vec::<_>>();
+                let connected = state.connected.iter().map(|s| Box::clone(&*s.key())).collect::<Vec::<_>>();
                 let json = serde_json::to_string(&connected).unwrap();
                 _ = streamer.send(json);
                 tokio_sleep(TokioDuration::from_millis(100)).await
