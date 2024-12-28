@@ -4,7 +4,8 @@ function uuidv4() {
   );
 }
 
-let deviceName = `${getDeviceType()}-${uuidv4()}`;
+let uuid = uuidv4();
+let deviceName = `${getDeviceType()}-${uuid}`;
 
 let connected = new Map();
 
@@ -169,7 +170,8 @@ window.addEventListener("load", async () => {
   connectDevicesSSE();
 
   let deviceName_ = encodeURIComponent(deviceName);
-  await fetch(`init-device?deviceName=${deviceName_}`, {
+  let uuid_ = encodeURIComponent(uuid);
+  await fetch(`init-device?deviceName=${deviceName_}&uuid=${uuid_}`, {
     method: "POST"
   });
 
@@ -215,18 +217,16 @@ document.getElementById("device-form").addEventListener("submit", async function
   resultDiv.classList.remove("device-hidden");
 
   let deviceName_ = encodeURIComponent(deviceName);
-  await fetch(`uninit-device?deviceName=${deviceName_}`, {
-    method: "POST"
-  });
+  let uuid_ = encodeURIComponent(uuid);
+  await fetch(`uninit-device?deviceName=${deviceName_}&uuid=${uuid_}`, {method: "POST"});
 
   connected.delete(deviceName);
   deviceName = fullDeviceName;
   connected.set(deviceName, true);
   
   deviceName_ = encodeURIComponent(deviceName);
-  await fetch(`init-device?deviceName=${deviceName_}`, {
-    method: "POST"
-  });
+  uuid_ = encodeURIComponent(uuid);
+  await fetch(`init-device?deviceName=${deviceName_}&uuid=${uuid_}`, {method: "POST"});
 });
 
 document.getElementById("drag_and_drop-menu").addEventListener("click", () => {
@@ -407,8 +407,7 @@ async function uploadFile(fileObject) {
 
     console.log("Sending upload request...");
 
-    let deviceName_ = encodeURIComponent(deviceName);
-    const response = await fetch(`/upload-desktop?deviceName=${deviceName_}`, {
+    const response = await fetch(`/upload-desktop?uuid=${encodeURIComponent(uuid)}`, {
       method: "POST",
       body: formData,
     });
@@ -432,8 +431,8 @@ async function uploadFile(fileObject) {
 
 async function openProgressConnection(file) {
   return new Promise((resolve, reject) => {
-    let deviceName_ = encodeURIComponent(deviceName);
-    const eventSource = new EventSource(`/progress/${file.name}?deviceName=${deviceName_}`);
+    let uuid_ = encodeURIComponent(uuid);
+    const eventSource = new EventSource(`/progress/${file.name}?uuid=${uuid_}`);
 
     eventSource.onopen = () => {
       console.log(`Progress connection for ${file.name} established.`);

@@ -5,8 +5,8 @@ use std::net::{IpAddr, UdpSocket};
 use std::io::{Cursor, Write, BufWriter};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use dashmap::DashMap;
 use actix_web::rt as actix_rt;
-use dashmap::{DashMap, DashSet};
 use qrcodegen::{QrCode, QrCodeEcc};
 use serde::{Deserialize, Serialize};
 use actix_files::Files as ActixFiles;
@@ -68,11 +68,14 @@ pub struct TrackFile {
     progress: u8
 }
 
+#[derive(Debug)]
 pub struct Client {
     size: usize,
     progress: u8,
     mobile: bool,
-    sender: watch::Sender::<u8>
+    sender: watch::Sender::<u8>,
+    ip: Box::<str>,
+    uuid: Box::<str>,
 }
 
 atomic_type! {
@@ -180,7 +183,7 @@ impl File {
 enum Transmission { Mobile, Zipping, Desktop }
 
 struct Server {
-    connected: Arc::<DashSet::<Box::<str>>>,
+    connected: Arc::<DashMap::<Box::<str>, Box::<str>>>,
 
     qr_bytes: web::Bytes,
 
@@ -236,13 +239,19 @@ fn user_agent_is_mobile(user_agent: &str) -> bool {
 }
 
 #[derive(Deserialize)]
+struct Uuid {
+    uuid: String
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DeviceName {
-    device_name: String
+struct UuidDeviceName {
+    device_name: String,
+    uuid: String,
 }
 
 #[get("/progress/{file_name}")]
-async fn track_progress(state: Data::<Server>, rq: HttpRequest, path: Path::<String>) -> impl Responder {
+async fn track_progress(state: Data::<Server>, rq: HttpRequest, path: Path::<String>, query: Query::<Uuid>) -> impl Responder {
     let Some(user_agent) = rq.headers().get("User-Agent").and_then(|header| header.to_str().ok()) else {
         return HttpResponse::BadRequest().body("Request to `/` that does not contain user agent")
     };
@@ -259,6 +268,8 @@ async fn track_progress(state: Data::<Server>, rq: HttpRequest, path: Path::<Str
         sender: tx,
         progress: 0,
         mobile: user_agent_is_mobile(user_agent),
+        uuid: query.uuid.to_owned().into_boxed_str(),
+        ip: rq.peer_addr().unwrap().ip().to_string().into_boxed_str(),
     });
 
     HttpResponse::Ok()
@@ -289,9 +300,7 @@ async fn qr_code(state: Data::<Server>) -> impl Responder {
 }
 
 #[post("/upload-desktop")]
-async fn upload_desktop(state: Data::<Server>, query: Query::<DeviceName>, mut multipart: Multipart) -> impl Responder {
-    println!("{}", query.device_name);
-
+async fn upload_desktop(state: Data::<Server>, mut multipart: Multipart, query: Query::<Uuid>) -> impl Responder {
     println!("[INFO] upload-desktop requested, parsing multipart..");
 
     let file = match File::from_multipart(&mut multipart, Arc::clone(&state.clients), Arc::clone(&state.files_progress_pinger)).await {
@@ -309,7 +318,7 @@ async fn upload_desktop(state: Data::<Server>, query: Query::<DeviceName>, mut m
 }
 
 #[post("/upload-mobile")]
-async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl Responder {
+async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>, query: Query::<Uuid>) -> impl Responder {
     println!("[INFO] upload-mobile requested, parsing multipart..");
 
     let File { bytes, name, size } = match File::from_multipart(&mut multipart, Arc::clone(&state.clients), Arc::clone(&state.files_progress_pinger)).await {
@@ -319,6 +328,15 @@ async fn upload_mobile(mut multipart: Multipart, state: Data::<Server>) -> impl 
 
     #[cfg(feature = "dbg")] let mut name = name;
     #[cfg(feature = "dbg")] { name = name + ".test" }
+
+    /* TODO:
+        We will have a `connected` hashmap here, and we'll check the ip of device current `uuid` is "connected" to,
+        and if the ip matches we would just write the file right off the bat.
+
+        If the ip does not match, we would do kinda the same thing we would do with the `upload-desktop` thing.
+        We would just append the file to the `files` vector and wait till the client pressed the `download` button,
+        then send the compressed files in zip.
+    */
 
     if let Err(e) = actix_rt::task::spawn_blocking(move || {
         let file_path = format!{
@@ -361,13 +379,9 @@ impl<W: Write> ProgressTracker::<W> {
         Self { writer, written: 0, total_size, progress_sender }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn progress(&self) -> usize {
-        if self.written >= self.total_size {
-            100
-        } else {
-            (self.written * 100 / self.total_size).min(100)
-        }
+        (self.written * 100 / self.total_size).min(100)
     }
 }
 
@@ -585,16 +599,20 @@ async fn connected_devices(state: Data::<Server>) -> impl Responder {
 }
 
 #[post("/init-device")]
-async fn init_device(state: Data::<Server>, query: Query::<DeviceName>) -> impl Responder {
-    state.connected.insert(query.device_name.to_owned().into_boxed_str());
-    _ = state.connected_devices_pinger.lock().await.as_ref().unwrap().send(()).await;
+async fn init_device(state: Data::<Server>, query: Query::<UuidDeviceName>) -> impl Responder {
+    state.connected.insert(query.uuid.to_owned().into_boxed_str(), query.device_name.to_owned().into_boxed_str());
+    if let Some(sender) = state.connected_devices_pinger.lock().await.as_ref() {
+        _ = sender.send(()).await
+    }
     HttpResponse::Ok().finish()
 }
 
 #[post("/uninit-device")]
-async fn uninit_device(state: Data::<Server>, query: Query::<DeviceName>) -> impl Responder {
-    state.connected.remove(&query.device_name.to_owned().into_boxed_str());
-    _ = state.connected_devices_pinger.lock().await.as_ref().unwrap().send(()).await;
+async fn uninit_device(state: Data::<Server>, query: Query::<UuidDeviceName>) -> impl Responder {
+    state.connected.remove(&query.uuid.to_owned().into_boxed_str());
+    if let Some(sender) = state.connected_devices_pinger.lock().await.as_ref() {
+        _ = sender.send(()).await
+    }
     HttpResponse::Ok().finish()
 }
 
@@ -616,7 +634,7 @@ async fn main() -> std::io::Result<()> {
     let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode URL to QR code");
 
     let server = Data::new(Server {
-        connected: Arc::new(DashSet::new()),
+        connected: Arc::new(DashMap::new()),
 
         qr_bytes: gen_qr_png_bytes(&qr).expect("could not generate QR code image").into(),
 

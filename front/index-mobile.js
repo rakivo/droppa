@@ -1,8 +1,76 @@
+function getDeviceType() {
+  const ua = navigator.userAgent;
+  return /Mobi|Android/i.test(ua) ? "MOBILE" : "DESKTOP";
+}
+
+function uuidv4() {
+  return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, c =>
+    (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> +c / 4).toString(16)
+  );
+}
+
+let uuid = uuidv4();
+let deviceName = `${getDeviceType()}-${uuid}`;
+
+let connected = new Map();
+
 let globalFiles = [];
 
 let downloadFiles = new Map();
 
 let eventSource = null;
+let devicesEventSource = null;
+
+function connectDevicesSSE() {
+  if (devicesEventSource && devicesEventSource.readyState !== EventSource.CLOSED) {
+    console.log("SSE connection already active");
+    return;
+  }
+
+  console.log("Establishing SSE connection...");
+
+  devicesEventSource = new EventSource('/connected-devices');
+
+  devicesEventSource.onopen = () => {
+    console.log("SSE connection established");
+  };
+
+  devicesEventSource.onmessage = (event) => {
+    console.log("Received SSE message:", event.data);
+
+    try {
+      const devices = JSON.parse(event.data); // Expecting an array of devices from the server
+      if (devices.length > 0) {
+        devices.forEach((device) => {
+          if (!connected.has(device) && device != deviceName) {
+            connected.set(device, false);
+          }
+        });
+
+        connected.forEach((domCreated, deviceName) => {
+          if (!domCreated) {
+            const option = document.createElement('option');
+            option.value = deviceName;
+            option.textContent = deviceName;
+            connected.set(deviceName, true);
+          }
+        });
+      }
+    } catch (error) {
+      console.error("Error processing SSE message:", error);
+    }
+  };
+
+  devicesEventSource.onerror = (error) => {
+    console.error("SSE connection error:", error);
+    // Close the connection and retry after a delay
+    if (devicesEventSource) {
+      devicesEventSource.close();
+      devicesEventSource = null;
+      setTimeout(() => connectDevicesSSE(), 2500);
+    }
+  };
+}
 
 function connectSSE() {
   if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
@@ -94,7 +162,13 @@ window.addEventListener("beforeunload", () => {
   }
 });
 
-window.addEventListener("load", () => {
+window.addEventListener("load", async () => {
+  connectDevicesSSE();
+
+  await fetch(`init-device?deviceName=${encodeURIComponent(deviceName)}&uuid=${encodeURIComponent(uuid)}`, {
+    method: "POST"
+  });
+
   connectSSE();
 });
 
@@ -376,7 +450,7 @@ async function uploadFile(fileObject) {
     trackProgress(eventSource, fileObject);
 
     console.log("Sending upload request...");
-    const response = await fetch("/upload-mobile", {
+    const response = await fetch(`/upload-mobile?uuid=${encodeURIComponent(uuid)}`, {
       method: "POST",
       body: formData,
     });
@@ -400,7 +474,7 @@ async function uploadFile(fileObject) {
 
 async function openProgressConnection(file) {
   return new Promise((resolve, reject) => {
-    const eventSource = new EventSource(`/progress/${file.name}`);
+    const eventSource = new EventSource(`/progress/${file.name}?uuid=${encodeURIComponent(uuid)}`);
 
     eventSource.onopen = () => {
       console.log(`Progress connection for ${file.name} established.`);
