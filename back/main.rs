@@ -193,7 +193,6 @@ struct Server {
     clients: AtomicClients,
 
     files_progress_pinger: AtomicProgressPinger,
-    connected_devices_pinger: AtomicProgressPinger,
 
     zipping_progress_sender: AtomicSyncProgressSender,
 
@@ -243,11 +242,19 @@ struct Uuid {
     uuid: String
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UuidDeviceName {
-    device_name: String,
-    uuid: String,
+    device_name: Box::<str>,
+    uuid: Box::<str>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceEvent {
+    device_name: Box::<str>,
+    uuid: Box::<str>,
+    connected: bool,
 }
 
 #[get("/progress/{file_name}")]
@@ -557,38 +564,9 @@ async fn zipping_progress(state: Data::<Server>) -> impl Responder {
     stream_progress(state, Transmission::Zipping).await
 }
 
-#[get("/connected-devices")]
-async fn connected_devices(state: Data::<Server>) -> impl Responder {
-    if state.connected_devices_pinger.lock().await.is_some() {
-        let streamer = BroadcastStream::new(state.connected_devices_streamer.lock().await.subscribe());
-        return HttpResponse::Ok()
-            .keep_alive()
-            .content_type("text/event-stream")
-            .append_header(("Cache-Control", "no-cache"))
-            .streaming(streamer.map(|data| {
-                Ok::<_, actix_web::Error>(format!("data: {}\n\n", data.unwrap()).into())
-            }))
-    }
-
-    let (tx, mut rx) = mpsc::channel(8);
-    *state.connected_devices_pinger.lock().await = Some(tx);
-
-    let state_ = Data::clone(&state);
-    actix_rt::spawn(async move {
-        loop {
-            if rx.try_recv().is_ok() {
-                let streamer = state.connected_devices_streamer.lock().await;
-                let connected = state.connected.iter().map(|s| Box::clone(&*s.key())).collect::<Vec::<_>>();
-                let json = serde_json::to_string(&connected).unwrap();
-                _ = streamer.send(json);
-                tokio_sleep(TokioDuration::from_millis(100)).await
-            } else {
-                tokio_sleep(TokioDuration::from_millis(150)).await
-            }
-        }
-    });
-
-    let streamer = BroadcastStream::new(state_.connected_devices_streamer.lock().await.subscribe());
+#[get("/connected-device")]
+async fn connected_device(state: Data::<Server>) -> impl Responder {
+    let streamer = BroadcastStream::new(state.connected_devices_streamer.lock().await.subscribe());
     return HttpResponse::Ok()
         .keep_alive()
         .content_type("text/event-stream")
@@ -600,19 +578,27 @@ async fn connected_devices(state: Data::<Server>) -> impl Responder {
 
 #[post("/init-device")]
 async fn init_device(state: Data::<Server>, query: Query::<UuidDeviceName>) -> impl Responder {
-    state.connected.insert(query.uuid.to_owned().into_boxed_str(), query.device_name.to_owned().into_boxed_str());
-    if let Some(sender) = state.connected_devices_pinger.lock().await.as_ref() {
-        _ = sender.send(()).await
-    }
+    state.connected.insert(query.uuid.to_owned(), query.device_name.to_owned());
+    let device_event = DeviceEvent {
+        device_name: Box::clone(&query.device_name),
+        uuid: Box::clone(&query.uuid),
+        connected: true
+    };
+    let json = serde_json::to_string(&device_event).unwrap();
+    state.connected_devices_streamer.lock().await.send(json).unwrap();
     HttpResponse::Ok().finish()
 }
 
 #[post("/uninit-device")]
 async fn uninit_device(state: Data::<Server>, query: Query::<UuidDeviceName>) -> impl Responder {
-    state.connected.remove(&query.uuid.to_owned().into_boxed_str());
-    if let Some(sender) = state.connected_devices_pinger.lock().await.as_ref() {
-        _ = sender.send(()).await
-    }
+    state.connected.remove(&query.uuid.to_owned());
+    let device_event = DeviceEvent {
+        device_name: Box::clone(&query.device_name),
+        uuid: Box::clone(&query.uuid),
+        connected: true
+    };
+    let json = serde_json::to_string(&device_event).unwrap();
+    state.connected_devices_streamer.lock().await.send(json).unwrap();
     HttpResponse::Ok().finish()
 }
 
@@ -652,8 +638,6 @@ async fn main() -> std::io::Result<()> {
 
         files_progress_pinger: Arc::new(TokioMutex::new(None)),
 
-        connected_devices_pinger: Arc::new(TokioMutex::new(None)),
-
         zipping_progress_sender: Arc::new(Mutex::new(None)),
 
         zipping_progress_streamer: Arc::new(TokioMutex::new(None)),
@@ -677,7 +661,7 @@ async fn main() -> std::io::Result<()> {
             .service(track_progress)
             .service(download_files)
             .service(zipping_progress)
-            .service(connected_devices)            
+            .service(connected_device)
             .service(download_files_progress_mobile)
             .service(download_files_progress_desktop)
             .service(ActixFiles::new("/", "./front"))

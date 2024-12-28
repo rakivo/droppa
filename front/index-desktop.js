@@ -77,7 +77,7 @@ function connectDevicesSSE() {
 
   console.log("Establishing SSE connection...");
 
-  devicesEventSource = new EventSource("/connected-devices");
+  devicesEventSource = new EventSource("/connected-device");
 
   devicesEventSource.onopen = () => {
     console.log("SSE connection established");
