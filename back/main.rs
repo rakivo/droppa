@@ -11,12 +11,12 @@ use qrcodegen::{QrCode, QrCodeEcc};
 use serde::{Deserialize, Serialize};
 use actix_files::Files as ActixFiles;
 use actix_web::{get, post, HttpRequest};
-use tokio_stream::wrappers::WatchStream;
 use futures_util::{StreamExt, TryStreamExt};
 use actix_multipart::{Multipart, MultipartError};
+use tokio_stream::wrappers::{WatchStream, BroadcastStream};
 use zip::{ZipWriter, CompressionMethod, write::SimpleFileOptions};
 use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
-use tokio::sync::{mpsc, watch, Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
+use tokio::sync::{mpsc, watch, broadcast, Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Path, Data, Query}};
 
 #[allow(unused_imports, unused_parens, non_camel_case_types, unused_mut, dead_code, unused_assignments, unused_variables, static_mut_refs, non_snake_case, non_upper_case_globals)]
@@ -83,6 +83,7 @@ atomic_type! {
 atomic_type! {
     tokio.type ProgressPinger = Option::<mpsc::Sender::<()>>;
     tokio.type ProgressStreamer = Option::<watch::Sender::<String>>;
+    tokio.type DevicesBroadcaster = broadcast::Sender::<String>;
 }
 
 atomic_type! {
@@ -189,10 +190,12 @@ struct Server {
     clients: AtomicClients,
 
     files_progress_pinger: AtomicProgressPinger,
+    connected_devices_pinger: AtomicProgressPinger,
 
     zipping_progress_sender: AtomicSyncProgressSender,
 
     zipping_progress_streamer: AtomicProgressStreamer,
+    connected_devices_streamer: AtomicDevicesBroadcaster,
     mobile_files_progress_streamer: AtomicProgressStreamer,
     desktop_files_progress_streamer: AtomicProgressStreamer
 }
@@ -542,20 +545,56 @@ async fn zipping_progress(state: Data::<Server>) -> impl Responder {
 
 #[get("/connected-devices")]
 async fn connected_devices(state: Data::<Server>) -> impl Responder {
-    let connected = state.connected.iter().map(|s| Box::clone(&*s)).collect::<Vec::<_>>();
-    let json = serde_json::to_string(&connected).unwrap();
-    HttpResponse::Ok().json(json)
+    if state.connected_devices_pinger.lock().await.is_some() {
+        let streamer = BroadcastStream::new(state.connected_devices_streamer.lock().await.subscribe());
+        return HttpResponse::Ok()
+            .keep_alive()
+            .content_type("text/event-stream")
+            .append_header(("Cache-Control", "no-cache"))
+            .streaming(streamer.map(|data| {
+                Ok::<_, actix_web::Error>(format!("data: {}\n\n", data.unwrap()).into())
+            }))
+    }
+
+    let (tx, mut rx) = mpsc::channel(8);
+    *state.connected_devices_pinger.lock().await = Some(tx);
+
+    let state_ = Data::clone(&state);
+    actix_rt::spawn(async move {
+        loop {
+            if rx.try_recv().is_ok() {
+                let streamer = state.connected_devices_streamer.lock().await;
+                let connected = state.connected.iter().map(|s| Box::clone(&*s)).collect::<Vec::<_>>();
+                let json = serde_json::to_string(&connected).unwrap();
+                _ = streamer.send(json);
+                tokio_sleep(TokioDuration::from_millis(100)).await
+            } else {
+                tokio_sleep(TokioDuration::from_millis(150)).await
+            }
+        }
+    });
+
+    let streamer = BroadcastStream::new(state_.connected_devices_streamer.lock().await.subscribe());
+    return HttpResponse::Ok()
+        .keep_alive()
+        .content_type("text/event-stream")
+        .append_header(("Cache-Control", "no-cache"))
+        .streaming(streamer.map(|data| {
+            Ok::<_, actix_web::Error>(format!("data: {}\n\n", data.unwrap()).into())
+        }))
 }
 
 #[post("/init-device")]
 async fn init_device(state: Data::<Server>, query: Query::<DeviceName>) -> impl Responder {
     state.connected.insert(query.device_name.to_owned().into_boxed_str());
+    _ = state.connected_devices_pinger.lock().await.as_ref().unwrap().send(()).await;
     HttpResponse::Ok().finish()
 }
 
 #[post("/uninit-device")]
 async fn uninit_device(state: Data::<Server>, query: Query::<DeviceName>) -> impl Responder {
     state.connected.remove(&query.device_name.to_owned().into_boxed_str());
+    _ = state.connected_devices_pinger.lock().await.as_ref().unwrap().send(()).await;
     HttpResponse::Ok().finish()
 }
 
@@ -587,9 +626,7 @@ async fn main() -> std::io::Result<()> {
 
             if !dir.exists() {
                 fs::create_dir(&dir).expect("could not create `droppa` downloads sub-directory")
-            }
-
-            dir
+            } dir
         },
 
         files: Arc::new(Mutex::new(Vec::new())),
@@ -597,9 +634,12 @@ async fn main() -> std::io::Result<()> {
 
         files_progress_pinger: Arc::new(TokioMutex::new(None)),
 
+        connected_devices_pinger: Arc::new(TokioMutex::new(None)),
+
         zipping_progress_sender: Arc::new(Mutex::new(None)),
 
         zipping_progress_streamer: Arc::new(TokioMutex::new(None)),
+        connected_devices_streamer: Arc::new(TokioMutex::new(broadcast::channel(64).0)),
         mobile_files_progress_streamer: Arc::new(TokioMutex::new(None)),
         desktop_files_progress_streamer: Arc::new(TokioMutex::new(None)),
     });
@@ -619,7 +659,7 @@ async fn main() -> std::io::Result<()> {
             .service(track_progress)
             .service(download_files)
             .service(zipping_progress)
-            .service(connected_devices)
+            .service(connected_devices)            
             .service(download_files_progress_mobile)
             .service(download_files_progress_desktop)
             .service(ActixFiles::new("/", "./front"))

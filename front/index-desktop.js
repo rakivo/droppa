@@ -7,37 +7,6 @@ const deviceSelectorSelect = document.getElementById('deviceSelectorSelect');
 const deviceSelectorConnectButton = document.getElementById('deviceSelectorConnectButton');
 const deviceSelectorStatusMessage = document.getElementById('deviceSelectorStatusMessage');
 
-async function fetchConnectedDevices() {
-  try {
-    const response = await fetch('/connected-devices');
-    const json = await response.json();
-    const devices = await JSON.parse(json);
-
-    if (devices.length > 0) {
-      devices.forEach((device) => {
-        if (!connected.has(device)) {
-          connected.set(device, false);
-        }
-      });
-
-      connected.forEach((domCreated, deviceName) => {
-        if (!domCreated) {
-          const option = document.createElement('option');
-          option.value = deviceName;
-          option.textContent = deviceName;
-          deviceSelectorSelect.appendChild(option);
-          connected.set(deviceName, true); // Mark as added to the DOM
-        }
-      });
-    } else {
-      deviceSelectorStatusMessage.textContent = 'No connected devices found.';
-    }
-  } catch (error) {
-    console.error('Error fetching connected devices:', error);
-    deviceSelectorStatusMessage.textContent = 'Failed to load devices.';
-  }
-}
-
 // Handle device selection and enable the connect button
 deviceSelectorSelect.addEventListener('change', () => {
   const selectedDevice = deviceSelectorSelect.value;
@@ -73,6 +42,63 @@ let globalFiles = [];
 let downloadFiles = new Map();
 
 let eventSource = null;
+let devicesEventSource = null;
+
+function connectDevicesSSE() {
+  if (devicesEventSource && devicesEventSource.readyState !== EventSource.CLOSED) {
+    console.log("SSE connection already active");
+    return;
+  }
+
+  console.log("Establishing SSE connection...");
+
+  devicesEventSource = new EventSource('/connected-devices');
+
+  devicesEventSource.onopen = () => {
+    console.log("SSE connection established");
+    deviceSelectorStatusMessage.textContent = '';
+  };
+
+  devicesEventSource.onmessage = (event) => {
+    console.log("Received SSE message:", event.data);
+
+    try {
+      const devices = JSON.parse(event.data); // Expecting an array of devices from the server
+      if (devices.length > 0) {
+        devices.forEach((device) => {
+          if (!connected.has(device)) {
+            connected.set(device, false); // Mark as not yet added to the DOM
+          }
+        });
+
+        connected.forEach((domCreated, deviceName) => {
+          if (!domCreated) {
+            const option = document.createElement('option');
+            option.value = deviceName;
+            option.textContent = deviceName;
+            deviceSelectorSelect.appendChild(option);
+            connected.set(deviceName, true); // Mark as added to the DOM
+          }
+        });
+      } else {
+        deviceSelectorStatusMessage.textContent = 'No connected devices found.';
+      }
+    } catch (error) {
+      console.error("Error processing SSE message:", error);
+    }
+  };
+
+  devicesEventSource.onerror = (error) => {
+    console.error("SSE connection error:", error);
+    deviceSelectorStatusMessage.textContent = 'Failed to load devices.';
+    // Close the connection and retry after a delay
+    if (devicesEventSource) {
+      devicesEventSource.close();
+      devicesEventSource = null;
+      setTimeout(() => connectDevicesSSE(), 2500);
+    }
+  };
+}
 
 function connectSSE() {
   if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
@@ -135,6 +161,8 @@ window.addEventListener("beforeunload", () => {
 });
 
 window.addEventListener("load", async () => {
+  connectDevicesSSE();
+
   let deviceName_ = encodeURIComponent(deviceName);
   await fetch(`init-device?deviceName=${deviceName_}`, {
     method: "POST"
@@ -447,6 +475,3 @@ async function trackProgress(eventSource, fileObject) {
     }
   };
 }
-
-// TODO: establish SSE instead
-setInterval(fetchConnectedDevices, 1000);
