@@ -36,12 +36,11 @@ deviceSelectorSelect.addEventListener("change", () => {
 // Send the connection request
 deviceSelectorConnectButton.addEventListener("click", async () => {
   const deviceUuid = deviceSelectorSelect.value;
-  const to = "someOtherDeviceName"; // You can replace this with the target device if needed
 
   try {
     const response = await fetch(
-      `/connect?uuid=${encodeURIComponent(deviceUuid)}&to=${encodeURIComponent(
-        to
+      `/connect?uuid=${encodeURIComponent(uuid)}&to=${encodeURIComponent(
+        deviceUuid
       )}`,
       {
         method: "GET",
