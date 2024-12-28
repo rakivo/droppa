@@ -35,14 +35,14 @@ deviceSelectorSelect.addEventListener("change", () => {
 
 // Send the connection request
 deviceSelectorConnectButton.addEventListener("click", async () => {
-  const deviceName = deviceSelectorSelect.value;
+  const deviceUuid = deviceSelectorSelect.value;
   const to = "someOtherDeviceName"; // You can replace this with the target device if needed
 
   try {
     const response = await fetch(
-      `/connect?deviceName=${encodeURIComponent(
-        deviceName
-      )}&to=${encodeURIComponent(to)}`,
+      `/connect?uuid=${encodeURIComponent(deviceUuid)}&to=${encodeURIComponent(
+        to
+      )}`,
       {
         method: "GET",
       }
@@ -88,24 +88,37 @@ function connectDevicesSSE() {
     console.log("Received SSE message:", event.data);
 
     try {
-      const devices = JSON.parse(event.data); // Expecting an array of devices from the server
-      if (devices.length > 0) {
-        devices.forEach((device) => {
-          if (!connected.has(device) && device != deviceName) {
-            connected.set(device, false);
-          }
-        });
+      const device = JSON.parse(event.data); // object with connected device info
+      console.log(device.uuid);
 
-        connected.forEach((domCreated, deviceName) => {
-          if (!domCreated) {
-            const option = document.createElement("option");
-            option.value = deviceName;
-            option.textContent = deviceName;
-            deviceSelectorSelect.appendChild(option);
-            connected.set(deviceName, true);
-          }
-        });
+      console.log(connected);
+      console.log(connected.has(device.uuid));
+
+      if (device.uuid == uuid) {
+        return;
+      }
+      if (device.connected) {
+        if (connected.has(device.uuid) && connected.size > 0) {
+          const deviceObject = connected.get(device.uuid);
+          deviceObject.optionDOM.value = device.deviceName;
+          deviceObject.optionDOM.textContent = device.deviceName;
+        } else {
+          const deviceObject = {};
+          const option = document.createElement("option");
+          deviceObject.optionDOM = option;
+          deviceObject.uuid = device.uuid;
+          deviceObject.deviceName = device.deviceName;
+          option.value = device.uuid;
+          option.textContent = device.deviceName;
+          connected.set(device.uuid, deviceObject);
+          deviceSelectorSelect.appendChild(option);
+        }
       } else {
+        const deviceObject = connected.get(device.uuid);
+        deviceObject.optionDOM.remove();
+        connected.delete(device.uuid);
+      }
+      if (connected.length == 0) {
         deviceSelectorStatusMessage.textContent = "No connected devices found.";
       }
     } catch (error) {
@@ -237,17 +250,13 @@ document
     resultDiv.textContent = `Device Name: ${fullDeviceName}`;
     resultDiv.classList.remove("device-hidden");
 
-    let deviceName_ = encodeURIComponent(deviceName);
+    let deviceName_ = encodeURIComponent(fullDeviceName);
     let uuid_ = encodeURIComponent(uuid);
     await fetch(`uninit-device?deviceName=${deviceName_}&uuid=${uuid_}`, {
       method: "POST",
     });
 
-    connected.delete(deviceName);
-    deviceName = fullDeviceName;
-    connected.set(deviceName, true);
-
-    deviceName_ = encodeURIComponent(deviceName);
+    deviceName_ = encodeURIComponent(fullDeviceName);
     uuid_ = encodeURIComponent(uuid);
     await fetch(`init-device?deviceName=${deviceName_}&uuid=${uuid_}`, {
       method: "POST",
