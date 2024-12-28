@@ -182,8 +182,13 @@ impl File {
 #[derive(Copy, Clone)]
 enum Transmission { Mobile, Zipping, Desktop }
 
+struct Device {
+    name: Box::<str>,
+    connected_to: Option::<Box::<str>> // uuid
+}
+
 struct Server {
-    connected: Arc::<DashMap::<Box::<str>, Box::<str>>>,
+    connected: Arc::<DashMap::<Box::<str>, Device>>,
 
     qr_bytes: web::Bytes,
 
@@ -578,7 +583,10 @@ async fn connected_device(state: Data::<Server>) -> impl Responder {
 
 #[post("/init-device")]
 async fn init_device(state: Data::<Server>, query: Query::<UuidDeviceName>) -> impl Responder {
-    state.connected.insert(query.uuid.to_owned(), query.device_name.to_owned());
+    state.connected.insert(query.uuid.to_owned(), Device {
+        name: Box::clone(&query.device_name),
+        connected_to: None
+    });
     let device_event = DeviceEvent {
         device_name: Box::clone(&query.device_name),
         uuid: Box::clone(&query.uuid),
@@ -591,7 +599,7 @@ async fn init_device(state: Data::<Server>, query: Query::<UuidDeviceName>) -> i
 
 #[post("/uninit-device")]
 async fn uninit_device(state: Data::<Server>, query: Query::<UuidDeviceName>) -> impl Responder {
-    state.connected.remove(&query.uuid.to_owned());
+    state.connected.remove(&query.uuid);
     let device_event = DeviceEvent {
         device_name: Box::clone(&query.device_name),
         uuid: Box::clone(&query.uuid),
@@ -599,6 +607,55 @@ async fn uninit_device(state: Data::<Server>, query: Query::<UuidDeviceName>) ->
     };
     let json = serde_json::to_string(&device_event).unwrap();
     state.connected_devices_streamer.lock().await.send(json).unwrap();
+    HttpResponse::Ok().finish()
+}
+
+#[derive(Deserialize)]
+struct UuidTo {
+    uuid: Box::<str>,
+    to: Box::<str>
+}
+
+#[derive(Serialize)]
+struct DeviceConnection {
+    uuid: Box::<str>,
+    name: Box::<str>
+}
+
+#[post("/connect-rq")]
+async fn connect_rq(state: Data::<Server>, query: Query::<UuidTo>) -> impl Responder {
+    let Some(from) = state.connected.get_mut(&query.uuid) else {
+        return HttpResponse::InternalServerError().finish();
+    };
+
+    let conn_rq = DeviceConnection {
+        name: Box::clone(&from.name),
+        uuid: Box::clone(&query.uuid)
+    };
+    
+    let json = serde_json::to_string(&conn_rq).unwrap();
+
+    state.connected_devices_streamer.lock().await.send(format!("\"CONN_RQ\": {json}")).unwrap();
+    HttpResponse::Ok().finish()
+}
+
+#[post("/connect")]
+async fn connect(state: Data::<Server>, query: Query::<UuidTo>) -> impl Responder {
+    let (Some(mut from), Some(mut to)) = (state.connected.get_mut(&query.uuid), state.connected.get_mut(&query.to)) else {
+        return HttpResponse::InternalServerError().finish();
+    };
+
+    from.connected_to = Some(Box::clone(&query.to));
+    to.connected_to = Some(Box::clone(&query.uuid));
+
+    let conn_rq = DeviceConnection {
+        name: Box::clone(&from.name),
+        uuid: Box::clone(&query.uuid)
+    };
+    
+    let json = serde_json::to_string(&conn_rq).unwrap();
+
+    state.connected_devices_streamer.lock().await.send(format!("\"CONN_ACCEPTED\": {json}")).unwrap();
     HttpResponse::Ok().finish()
 }
 
@@ -654,6 +711,8 @@ async fn main() -> std::io::Result<()> {
             .wrap(Logger::default())
             .service(index)
             .service(qr_code)
+            .service(connect)
+            .service(connect_rq)
             .service(init_device)
             .service(uninit_device)
             .service(upload_mobile)

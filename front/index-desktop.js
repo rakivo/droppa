@@ -39,11 +39,11 @@ deviceSelectorConnectButton.addEventListener("click", async () => {
 
   try {
     const response = await fetch(
-      `/connect?uuid=${encodeURIComponent(uuid)}&to=${encodeURIComponent(
+      `/connect-rq?uuid=${encodeURIComponent(uuid)}&to=${encodeURIComponent(
         deviceUuid
       )}`,
       {
-        method: "GET",
+        method: "POST",
       }
     );
 
