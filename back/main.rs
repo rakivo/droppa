@@ -147,8 +147,6 @@ impl File {
                     bytes.extend_from_slice(&chunk);
                     let progress = (bytes.len() * 100 / size).min(100) as u8;
                     if progress % 5 == 0 {
-                        println!("[INFO {name}] copying chunk..");
-
                         let Some(mut ps) = clients.get_mut(name) else {
                             println!("[ERROR] no: {name} in the clients hashmap, returning an error..");
                             return Err(MultipartError::Incomplete)
@@ -160,8 +158,6 @@ impl File {
                         if let Err(e) = ps.sender.send(progress) {
                             eprintln!("[ERROR] failed to send progress: {e}");
                         }
-
-                        println!("[INFO {name}] copied chunk, trying to lock the pinger..");
 
                         if let Ok(pp) = pp.try_lock() {
                             if let Some(pp) = pp.as_ref() {
