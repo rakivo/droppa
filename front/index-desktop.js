@@ -1,3 +1,73 @@
+// TODO: add a number after the device type, to distinguish them.
+let deviceName = getDeviceType();
+
+let connected = new Map();
+
+const deviceSelectorSelect = document.getElementById('deviceSelectorSelect');
+const deviceSelectorConnectButton = document.getElementById('deviceSelectorConnectButton');
+const deviceSelectorStatusMessage = document.getElementById('deviceSelectorStatusMessage');
+
+async function fetchConnectedDevices() {
+  try {
+    const response = await fetch('/connected-devices');
+    const json = await response.json();
+    const devices = await JSON.parse(json);
+
+    if (devices.length > 0) {
+      devices.forEach((device) => {
+        if (!connected.has(device)) {
+          connected.set(device, false);
+        }
+      });
+
+      connected.forEach((domCreated, deviceName) => {
+        if (!domCreated) {
+          const option = document.createElement('option');
+          option.value = deviceName;
+          option.textContent = deviceName;
+          deviceSelectorSelect.appendChild(option);
+          connected.set(deviceName, true); // Mark as added to the DOM
+        }
+      });
+    } else {
+      deviceSelectorStatusMessage.textContent = 'No connected devices found.';
+    }
+  } catch (error) {
+    console.error('Error fetching connected devices:', error);
+    deviceSelectorStatusMessage.textContent = 'Failed to load devices.';
+  }
+}
+
+// Handle device selection and enable the connect button
+deviceSelectorSelect.addEventListener('change', () => {
+  const selectedDevice = deviceSelectorSelect.value;
+  if (selectedDevice) {
+    deviceSelectorConnectButton.disabled = false;
+    deviceSelectorStatusMessage.textContent = '';
+  }
+});
+
+// Send the connection request
+deviceSelectorConnectButton.addEventListener('click', async () => {
+  const deviceName = deviceSelectorSelect.value;
+  const to = 'someOtherDeviceName'; // You can replace this with the target device if needed
+
+  try {
+    const response = await fetch(`/connect?deviceName=${encodeURIComponent(deviceName)}&to=${encodeURIComponent(to)}`, {
+      method: 'GET'
+    });
+
+    if (response.ok) {
+      deviceSelectorStatusMessage.textContent = `Connected to ${deviceName}`;
+    } else {
+      deviceSelectorStatusMessage.textContent = 'Failed to connect to device.';
+    }
+  } catch (error) {
+    console.error('Error connecting to device:', error);
+    deviceSelectorStatusMessage.textContent = 'Error connecting to device.';
+  }
+});
+
 let globalFiles = [];
 
 let downloadFiles = new Map();
@@ -64,7 +134,12 @@ window.addEventListener("beforeunload", () => {
   }
 });
 
-window.addEventListener("load", () => {
+window.addEventListener("load", async () => {
+  let deviceName_ = encodeURIComponent(deviceName);
+  await fetch(`init-device?deviceName=${deviceName_}`, {
+    method: "POST"
+  });
+
   connectSSE();
 
   const qrcodeContainer = document.getElementById("qrcode-container");
@@ -89,6 +164,34 @@ window.addEventListener("load", () => {
       qrcodeContainer.innerHTML = "<span>Error loading QR Code</span>";
       console.error(error);
     });
+});
+
+function getDeviceType() {
+  const ua = navigator.userAgent;
+  return /Mobi|Android/i.test(ua) ? "MOBILE" : "DESKTOP";
+}
+
+document.getElementById("device-form").addEventListener("submit", async function (e) {
+  e.preventDefault();
+
+  const customName = document.getElementById("device-name").value.trim();
+  const deviceType = getDeviceType();
+  const fullDeviceName = `${deviceType}-${customName}`;
+  const resultDiv = document.getElementById("device-result");
+  resultDiv.textContent = `Device Name: ${fullDeviceName}`;
+  resultDiv.classList.remove("device-hidden");
+
+  let deviceName_ = encodeURIComponent(deviceName);
+  await fetch(`uninit-device?deviceName=${deviceName_}`, {
+    method: "POST"
+  });
+
+  deviceName = fullDeviceName;
+  
+  deviceName_ = encodeURIComponent(deviceName);
+  await fetch(`init-device?deviceName=${deviceName_}`, {
+    method: "POST"
+  });
 });
 
 document.getElementById("drag_and_drop-menu").addEventListener("click", () => {
@@ -215,8 +318,8 @@ function createMessage(file, transmissionType) {
 function watchDownloadFileProgress(downloadFileObject) {
   console.log(downloadFileObject);
   /*   if (downloadFileObject.status == "success") {
-    return downloadFileObject;
-  } */
+       return downloadFileObject;
+       } */
   if (!downloadFileObject.domCreated) {
     const { message, fileNameSpan, messageStatusDiv } = createMessage(
       downloadFileObject,
@@ -268,7 +371,9 @@ async function uploadFile(fileObject) {
     trackProgress(eventSource, fileObject);
 
     console.log("Sending upload request...");
-    const response = await fetch("/upload-desktop", {
+
+    let deviceName_ = encodeURIComponent(deviceName);
+    const response = await fetch(`/upload-desktop?deviceName=${deviceName_}`, {
       method: "POST",
       body: formData,
     });
@@ -292,7 +397,8 @@ async function uploadFile(fileObject) {
 
 async function openProgressConnection(file) {
   return new Promise((resolve, reject) => {
-    const eventSource = new EventSource(`/progress/${file.name}`);
+    let deviceName_ = encodeURIComponent(deviceName);
+    const eventSource = new EventSource(`/progress/${file.name}?deviceName=${deviceName_}`);
 
     eventSource.onopen = () => {
       console.log(`Progress connection for ${file.name} established.`);
@@ -341,3 +447,6 @@ async function trackProgress(eventSource, fileObject) {
     }
   };
 }
+
+// TODO: establish SSE instead
+setInterval(fetchConnectedDevices, 1000);

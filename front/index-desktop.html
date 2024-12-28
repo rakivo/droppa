@@ -30,6 +30,82 @@
         align-items: center;
         min-height: 100vh;
       }
+      .device-container {
+          text-align: center;
+          background: #fff;
+          padding: 20px;
+          border-radius: 8px;
+          width: 300px;
+          top: 20px;
+          left: 20px;
+          position: absolute;
+      }
+      .device-selector-container {
+          text-align: center;
+          background: #fff;
+          padding: 20px;
+          border-radius: 8px;
+          width: 300px;
+          position: absolute;
+          top: 300px;
+          left: 20px;
+      }
+      .device-selector-select, .device-selector-connect-button {
+          padding: 10px;
+          margin-top: 10px;
+          width: 100%;
+          max-width: 250px;
+      }
+      .device-selector-connect-button {
+          cursor: pointer;
+          background-color: #007bff;
+          color: white;
+          border: none;
+          border-radius: 5px;
+          transition: background-color 0.3s;
+      }
+      .device-selector-connect-button:disabled {
+          background-color: #ccc;
+      }
+      .device-selector-connect-button:hover:not(:disabled) {
+          background-color: #0056b3;
+      }
+      .device-selector-status-message {
+          margin-top: 20px;
+          font-size: 16px;
+          color: #333;
+      }
+      .device-container form {
+          display: flex;
+          flex-direction: column;
+          gap: 5px;
+      }
+      .device-container input[type="text"] {
+          padding: 5px;
+          font-size: 0.9em;
+          border: 1px solid #ccc;
+          border-radius: 3px;
+      }
+      .device-container button {
+          background-color: #007bff;
+          color: white;
+          border: none;
+          border-radius: 3px;
+          padding: 5px;
+          font-size: 0.9em;
+          cursor: pointer;
+      }
+      .device-container button:hover {
+          background-color: #0056b3;
+      }
+      .device-result {
+          margin-top: 5px;
+          font-size: 0.8em;
+          color: #333;
+      }
+      .device-hidden {
+          display: none;
+      }
       #main_content h1 {
         margin-bottom: 20px;
         color: #4caf50;
@@ -233,6 +309,24 @@
   <body>
     <div id="qrcode-container">
       <span>Loading QR Code...</span>
+    </div>
+    <div class="device-container">
+      <h1>Device Name Customizer</h1>
+      <form id="device-form">
+        <label for="device-name">Enter a custom name for this device:</label>
+        <input type="text" id="device-name" placeholder="e.g., John's Laptop" required>
+        <button type="submit">Save Device Name</button>
+      </form>
+      <div id="device-result" class="device-result device-hidden"></div>
+    </div>
+    <div class="device-selector-container">
+      <h1>Select Device</h1>
+      <label for="deviceSelectorSelect">Choose a device to send information to:</label>
+      <select id="deviceSelectorSelect" class="device-selector-select">
+        <option value="" disabled selected>Select a device</option>
+      </select>
+      <button id="deviceSelectorConnectButton" class="device-selector-connect-button" disabled>Connect</button>
+      <p id="deviceSelectorStatusMessage" class="device-selector-status-message"></p>
     </div>
     <div id="toggle_mode-container">
       <div id="toggle_mode-indicator"></div>

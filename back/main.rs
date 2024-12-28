@@ -5,10 +5,10 @@ use std::net::{IpAddr, UdpSocket};
 use std::io::{Cursor, Write, BufWriter};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use serde::Serialize;
-use dashmap::DashMap;
 use actix_web::rt as actix_rt;
+use dashmap::{DashMap, DashSet};
 use qrcodegen::{QrCode, QrCodeEcc};
+use serde::{Deserialize, Serialize};
 use actix_files::Files as ActixFiles;
 use actix_web::{get, post, HttpRequest};
 use tokio_stream::wrappers::WatchStream;
@@ -17,7 +17,7 @@ use actix_multipart::{Multipart, MultipartError};
 use zip::{ZipWriter, CompressionMethod, write::SimpleFileOptions};
 use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use tokio::sync::{mpsc, watch, Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
-use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Path, Data}};
+use actix_web::{App, HttpServer, HttpResponse, Responder, middleware::Logger, web::{self, Path, Data, Query}};
 
 #[allow(unused_imports, unused_parens, non_camel_case_types, unused_mut, dead_code, unused_assignments, unused_variables, static_mut_refs, non_snake_case, non_upper_case_globals)]
 mod stb_image_write;
@@ -63,16 +63,16 @@ const HOME_DESKTOP_HTML: &[u8] = include_bytes!("../front/index-desktop.html");
 
 #[derive(Debug, Serialize)]
 pub struct TrackFile {
-    pub size: usize,
-    pub name: String,
-    pub progress: u8
+    size: usize,
+    name: String,
+    progress: u8
 }
 
 pub struct Client {
-    sender: watch::Sender::<u8>,
+    size: usize,
     progress: u8,
     mobile: bool,
-    size: usize,
+    sender: watch::Sender::<u8>
 }
 
 atomic_type! {
@@ -90,9 +90,9 @@ atomic_type! {
 }
 
 pub struct File {
-    pub size: usize,
-    pub name: String,
-    pub bytes: Vec::<u8>
+    size: usize,
+    name: String,
+    bytes: Vec::<u8>
 }
 
 impl File {
@@ -179,6 +179,8 @@ impl File {
 enum Transmission { Mobile, Zipping, Desktop }
 
 struct Server {
+    connected: Arc::<DashSet::<Box::<str>>>,
+
     qr_bytes: web::Bytes,
 
     downloads_dir: PathBuf,
@@ -230,8 +232,14 @@ fn user_agent_is_mobile(user_agent: &str) -> bool {
     ].iter().any(|keyword| user_agent.contains(keyword))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceName {
+    device_name: String
+}
+
 #[get("/progress/{file_name}")]
-async fn track_progress(rq: HttpRequest, path: Path::<String>, state: Data::<Server>) -> impl Responder {
+async fn track_progress(state: Data::<Server>, rq: HttpRequest, path: Path::<String>) -> impl Responder {
     let Some(user_agent) = rq.headers().get("User-Agent").and_then(|header| header.to_str().ok()) else {
         return HttpResponse::BadRequest().body("Request to `/` that does not contain user agent")
     };
@@ -244,16 +252,16 @@ async fn track_progress(rq: HttpRequest, path: Path::<String>, state: Data::<Ser
 
     println!("[INFO] inserted: {file_name} into the clients hashmap");
     state.clients.insert(file_name, Client {
+        size: 0,
         sender: tx,
         progress: 0,
-        size: 0,
-        mobile: user_agent_is_mobile(user_agent)
+        mobile: user_agent_is_mobile(user_agent),
     });
 
     HttpResponse::Ok()
-        .append_header(("Content-Type", "text/event-stream"))
+        .keep_alive()
+        .content_type("text/event-stream")
         .append_header(("Cache-Control", "no-cache"))
-        .append_header(("Connection", "keep-alive"))
         .streaming(rx.map(|data| {
             Ok::<_, actix_web::Error>(format!("data: {{ \"progress\": {data} }}\n\n").into())
         }))
@@ -266,7 +274,7 @@ async fn index(rq: HttpRequest) -> impl Responder {
     };
 
     HttpResponse::Ok()
-        .append_header(("Content-Type", "text/html"))
+        .content_type("text/html")
         .body(if user_agent_is_mobile(user_agent) {HOME_MOBILE_HTML} else {HOME_DESKTOP_HTML}) 
 }
 
@@ -278,7 +286,9 @@ async fn qr_code(state: Data::<Server>) -> impl Responder {
 }
 
 #[post("/upload-desktop")]
-async fn upload_desktop(mut multipart: Multipart, state: Data::<Server>) -> impl Responder {
+async fn upload_desktop(state: Data::<Server>, query: Query::<DeviceName>, mut multipart: Multipart) -> impl Responder {
+    println!("{}", query.device_name);
+
     println!("[INFO] upload-desktop requested, parsing multipart..");
 
     let file = match File::from_multipart(&mut multipart, Arc::clone(&state.clients), Arc::clone(&state.files_progress_pinger)).await {
@@ -530,6 +540,25 @@ async fn zipping_progress(state: Data::<Server>) -> impl Responder {
     stream_progress(state, Transmission::Zipping).await
 }
 
+#[get("/connected-devices")]
+async fn connected_devices(state: Data::<Server>) -> impl Responder {
+    let connected = state.connected.iter().map(|s| Box::clone(&*s)).collect::<Vec::<_>>();
+    let json = serde_json::to_string(&connected).unwrap();
+    HttpResponse::Ok().json(json)
+}
+
+#[post("/init-device")]
+async fn init_device(state: Data::<Server>, query: Query::<DeviceName>) -> impl Responder {
+    state.connected.insert(query.device_name.to_owned().into_boxed_str());
+    HttpResponse::Ok().finish()
+}
+
+#[post("/uninit-device")]
+async fn uninit_device(state: Data::<Server>, query: Query::<DeviceName>) -> impl Responder {
+    state.connected.remove(&query.device_name.to_owned().into_boxed_str());
+    HttpResponse::Ok().finish()
+}
+
 fn get_default_local_ip_addr() -> Option::<IpAddr> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.connect("1.1.1.1:80").ok()?;
@@ -548,6 +577,8 @@ async fn main() -> std::io::Result<()> {
     let qr = QrCode::encode_text(&local_addr, QrCodeEcc::Low).expect("could not encode URL to QR code");
 
     let server = Data::new(Server {
+        connected: Arc::new(DashSet::new()),
+
         qr_bytes: gen_qr_png_bytes(&qr).expect("could not generate QR code image").into(),
 
         downloads_dir: {
@@ -581,11 +612,14 @@ async fn main() -> std::io::Result<()> {
             .wrap(Logger::default())
             .service(index)
             .service(qr_code)
+            .service(init_device)
+            .service(uninit_device)
             .service(upload_mobile)
             .service(upload_desktop)
             .service(track_progress)
             .service(download_files)
             .service(zipping_progress)
+            .service(connected_devices)
             .service(download_files_progress_mobile)
             .service(download_files_progress_desktop)
             .service(ActixFiles::new("/", "./front"))
