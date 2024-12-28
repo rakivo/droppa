@@ -1,5 +1,10 @@
-// TODO: add a number after the device type, to distinguish them.
-let deviceName = getDeviceType();
+function uuidv4() {
+  return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, c =>
+    (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> +c / 4).toString(16)
+  );
+}
+
+let deviceName = `${getDeviceType()}-${uuidv4()}`;
 
 let connected = new Map();
 
@@ -66,8 +71,8 @@ function connectDevicesSSE() {
       const devices = JSON.parse(event.data); // Expecting an array of devices from the server
       if (devices.length > 0) {
         devices.forEach((device) => {
-          if (!connected.has(device)) {
-            connected.set(device, false); // Mark as not yet added to the DOM
+          if (!connected.has(device) && device != deviceName) {
+            connected.set(device, false);
           }
         });
 
@@ -77,7 +82,7 @@ function connectDevicesSSE() {
             option.value = deviceName;
             option.textContent = deviceName;
             deviceSelectorSelect.appendChild(option);
-            connected.set(deviceName, true); // Mark as added to the DOM
+            connected.set(deviceName, true);
           }
         });
       } else {
@@ -214,7 +219,9 @@ document.getElementById("device-form").addEventListener("submit", async function
     method: "POST"
   });
 
+  connected.delete(deviceName);
   deviceName = fullDeviceName;
+  connected.set(deviceName, true);
   
   deviceName_ = encodeURIComponent(deviceName);
   await fetch(`init-device?deviceName=${deviceName_}`, {
