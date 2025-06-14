@@ -52,7 +52,7 @@ macro_rules! lock_fn {
 const PORT: u16 = 6969;
 
 const GIG: usize = 1024 * 1024 * 1024;
-const SIZE_LIMIT: usize = GIG * 1;
+const SIZE_LIMIT: usize = GIG * 3;
 
 const DELIM: &str = if cfg!(windows) { "\\" } else { "/" };
 
@@ -238,7 +238,7 @@ async fn track_progress(rq: HttpRequest, path: Path::<String>, state: Data::<Ser
 
     let file_name = path.into_inner();
     println!("[INFO] client connected to <http://localhost:{PORT}/progress/{file_name}>");
-    
+
     let tx = watch::channel(0).0;
     let rx = WatchStream::new(tx.subscribe());
 
@@ -267,7 +267,7 @@ async fn index(rq: HttpRequest) -> impl Responder {
 
     HttpResponse::Ok()
         .append_header(("Content-Type", "text/html"))
-        .body(if user_agent_is_mobile(user_agent) {HOME_MOBILE_HTML} else {HOME_DESKTOP_HTML}) 
+        .body(if user_agent_is_mobile(user_agent) {HOME_MOBILE_HTML} else {HOME_DESKTOP_HTML})
 }
 
 #[get("/qr.png")]
